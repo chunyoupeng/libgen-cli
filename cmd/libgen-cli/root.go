@@ -22,7 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ciehanski/libgen-cli/libgen"
+	"github.com/chunyoupeng/libgen-cli/libgen"
 )
 
 var rootValidArgs = []string{"dbdumps", "download", "download-all", "link", "search", "status", "version"}

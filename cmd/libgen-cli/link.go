@@ -22,7 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ciehanski/libgen-cli/libgen"
+	"github.com/chunyoupeng/libgen-cli/libgen"
 )
 
 var linkCmd = &cobra.Command{

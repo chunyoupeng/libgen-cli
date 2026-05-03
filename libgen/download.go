@@ -131,7 +131,10 @@ func GetDownloadURL(book *Book, useIpfs bool) error {
 // DownloadDbdump downloads the selected database dump from
 // Library Genesis.
 func DownloadDbdump(filename string, outputPath string) error {
-	mirror := GetWorkingMirror(DbdumpsMirrors)
+	mirror, err := FindWorkingMirror(DbdumpsMirrors)
+	if err != nil {
+		return err
+	}
 	client := http.Client{
 		Transport: &http.Transport{
 			Proxy:           http.ProxyFromEnvironment,

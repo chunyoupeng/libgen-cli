@@ -28,7 +28,7 @@ import (
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 
-	"github.com/ciehanski/libgen-cli/libgen"
+	"github.com/chunyoupeng/libgen-cli/libgen"
 )
 
 // searchCmd represents the search command
@@ -94,7 +94,11 @@ var searchCmd = &cobra.Command{
 		fmt.Printf("++ Searching for: %s\n", searchQuery)
 
 		var books []*libgen.Book
-		var searchMirror = libgen.GetWorkingMirror(libgen.SearchMirrors)
+		searchMirror, err := libgen.FindWorkingMirror(libgen.SearchMirrors)
+		if err != nil {
+			fmt.Printf("error selecting search mirror: %v\n", err)
+			os.Exit(1)
+		}
 		books, err = libgen.Search(&libgen.SearchOptions{
 			Query:         searchQuery,
 			SearchMirror:  searchMirror,

@@ -223,7 +223,7 @@ func GetDetails(options *GetDetailsOptions) ([]*Book, error) {
 			}
 		}
 		if options.Language != "" {
-			if strings.ToLower(book.Language) != strings.ToLower(options.Language) {
+			if !strings.EqualFold(book.Language, options.Language) {
 				continue
 			}
 		}
@@ -242,6 +242,14 @@ func GetDetails(options *GetDetailsOptions) ([]*Book, error) {
 
 // CheckMirror returns the HTTP status code of the DownloadURL provided.
 func CheckMirror(url url.URL) int {
+	status, err := probeMirror(url)
+	if err != nil {
+		return http.StatusBadGateway
+	}
+	return status
+}
+
+func probeMirror(url url.URL) (int, error) {
 	client := http.Client{
 		Timeout: HTTPClientTimeout,
 		Transport: &http.Transport{
@@ -250,29 +258,49 @@ func CheckMirror(url url.URL) int {
 		}}
 	r, err := client.Get(url.String())
 	if err != nil {
-		return http.StatusBadGateway
+		return http.StatusBadGateway, err
 	}
 	if r.StatusCode != http.StatusOK {
-		return r.StatusCode
+		return r.StatusCode, nil
 	}
-	return http.StatusOK
+	return http.StatusOK, nil
 }
 
 // GetWorkingMirror selects a random mirror from the []url.DownloadURL
 // provided and checks the mirror for a proper HTTP status code
 // for working order.
 func GetWorkingMirror(urls []url.URL) url.URL {
-	var mirror url.URL
+	mirror, err := FindWorkingMirror(urls)
+	if err != nil {
+		return url.URL{}
+	}
+	return mirror
+}
 
-	for {
-		randMirror := urls[rand.Intn(len(urls))]
-		if CheckMirror(randMirror) == http.StatusOK {
-			mirror = randMirror
-			break
-		}
+// FindWorkingMirror checks each mirror at most once in random order and
+// returns the first mirror that responds with HTTP 200.
+func FindWorkingMirror(urls []url.URL) (url.URL, error) {
+	var mirror url.URL
+	if len(urls) == 0 {
+		return mirror, errors.New("no mirrors configured")
 	}
 
-	return mirror
+	var failures []string
+	for _, i := range rand.Perm(len(urls)) {
+		randMirror := urls[i]
+		status, err := probeMirror(randMirror)
+		if err == nil && status == http.StatusOK {
+			return randMirror, nil
+		}
+
+		reason := fmt.Sprintf("HTTP %d", status)
+		if err != nil {
+			reason = err.Error()
+		}
+		failures = append(failures, fmt.Sprintf("%s: %s", randMirror.String(), reason))
+	}
+
+	return mirror, fmt.Errorf("no working mirrors found (%d checked): %s", len(urls), strings.Join(failures, "; "))
 }
 
 // ParseDbdumps takes in a HTTP response and scans it for
@@ -343,11 +371,11 @@ func parseHashes(response []byte, results int) []string {
 // returns a Book object from the slice of bytes.
 func parseResponse(response []byte) (*Book, error) {
 	var book Book
-        var formattedResp []map[string]string
+	var formattedResp []map[string]string
 
-        if err := json.Unmarshal(response, &formattedResp); err != nil {
-                return nil, err
-        }
+	if err := json.Unmarshal(response, &formattedResp); err != nil {
+		return nil, err
+	}
 
 	if len(formattedResp) == 0 {
 		return nil, errors.New("empty response or unexpected JSON")
