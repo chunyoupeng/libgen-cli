@@ -21,28 +21,48 @@ import "net/url"
 var SearchMirrors = []url.URL{
 	{
 		Scheme: "https",
+		Host:   "libgen.li",
+		Path:   "index.php",
+	},
+	{
+		Scheme: "https",
+		Host:   "libgen.vg",
+		Path:   "index.php",
+	},
+	{
+		Scheme: "https",
+		Host:   "libgen.bz",
+		Path:   "index.php",
+	},
+	{
+		Scheme: "https",
+		Host:   "libgen.gl",
+		Path:   "index.php",
+	},
+	{
+		Scheme: "https",
 		Host:   "libgen.is",
-		Path:   "search.php",
+		Path:   "index.php",
 	},
 	{
 		Scheme: "https",
 		Host:   "libgen.rs",
-		Path:   "search.php",
+		Path:   "index.php",
 	},
 	{
 		Scheme: "https",
 		Host:   "libgen.st",
-		Path:   "search.php",
+		Path:   "index.php",
 	},
 	{
 		Scheme: "https",
 		Host:   "libgen.gs",
-		Path:   "search.php",
+		Path:   "index.php",
 	},
 	{
 		Scheme: "http",
 		Host:   "gen.lib.rus.ec",
-		Path:   "search.php",
+		Path:   "index.php",
 	},
 }
 
