@@ -80,9 +80,16 @@ func DownloadBook(book *Book, outputPath string) error {
 	return nil
 }
 
-// GetDownloadURL picks a random download mirror to download the specified
-// resource from.
+// GetDownloadURL picks a download mirror to download the specified
+// resource from. First tries the search mirror's ads.php page, then
+// falls back to legacy download mirrors.
 func GetDownloadURL(book *Book, useIpfs bool) error {
+	// Try getting download URL from search mirror's ads.php page first
+	if err := getSearchMirrorURL(book); err == nil && book.DownloadURL != "" {
+		return nil
+	}
+
+	// Fallback to legacy download mirrors
 	chosenMirror := DownloadMirrors[rand.Intn(len(DownloadMirrors))]
 
 	var x int
@@ -125,6 +132,36 @@ func GetDownloadURL(book *Book, useIpfs bool) error {
 	if book.DownloadURL == "" {
 		return fmt.Errorf("unable to retrieve download link for desired resource")
 	}
+	return nil
+}
+
+// getSearchMirrorURL extracts the download URL from the search mirror's
+// ads.php page, which contains a direct get.php download link.
+func getSearchMirrorURL(book *Book) error {
+	mirror := GetWorkingMirror(SearchMirrors)
+	mirror.Path = "ads.php"
+	q := mirror.Query()
+	q.Set("md5", book.Md5)
+	mirror.RawQuery = q.Encode()
+
+	book.PageURL = mirror.String()
+
+	b, err := getBody(mirror.String())
+	if err != nil {
+		return err
+	}
+
+	// Match the get.php download link
+	re := regexp.MustCompile(`get\.php\?md5=\w{32}&key=\w{16}`)
+	match := re.FindString(string(b))
+	if match == "" {
+		return errors.New("no valid download URL found on ads.php page")
+	}
+
+	mirror.Path = match
+	mirror.RawQuery = ""
+	book.DownloadURL = mirror.Scheme + "://" + mirror.Host + "/" + match
+
 	return nil
 }
 

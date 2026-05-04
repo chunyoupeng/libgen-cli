@@ -24,6 +24,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -134,7 +135,7 @@ func Search(options *SearchOptions) ([]*Book, error) {
 		setSortASC(q, options.SortASC)
 	}
 	options.SearchMirror.RawQuery = q.Encode()
-
+	fmt.Println("options.SearchMirror.String() = ", options.SearchMirror.String())
 	b, err := getBody(options.SearchMirror.String())
 	if err != nil {
 		return nil, err
@@ -169,10 +170,11 @@ func GetDetails(options *GetDetailsOptions) ([]*Book, error) {
 
 	// For each hash found on the page, parse it into a Book struct
 	for _, hash := range options.Hashes {
+		// Step 1: Get file info (filesize, extension, pages, md5, edition ID)
 		options.SearchMirror.Path = "json.php"
 		q := options.SearchMirror.Query()
-		q.Set("ids", hash)
-		q.Set("fields", JSONQuery)
+		q.Set("object", "f")
+		q.Set("md5", hash)
 		options.SearchMirror.RawQuery = q.Encode()
 
 		b, err := getBody(options.SearchMirror.String())
@@ -180,9 +182,23 @@ func GetDetails(options *GetDetailsOptions) ([]*Book, error) {
 			return nil, err
 		}
 
-		book, err := parseResponse(b)
+		book, editionID, err := parseFileResponse(b)
 		if err != nil {
-			return nil, err
+			continue
+		}
+
+		// Step 2: Get edition info (title, author, year, publisher, language)
+		if editionID != "" {
+			options.SearchMirror.Path = "json.php"
+			q = options.SearchMirror.Query()
+			q.Set("object", "e")
+			q.Set("ids", editionID)
+			options.SearchMirror.RawQuery = q.Encode()
+
+			eb, err := getBody(options.SearchMirror.String())
+			if err == nil {
+				parseEditionResponse(eb, book)
+			}
 		}
 
 		// Flag filters
@@ -350,7 +366,8 @@ func parseHashes(response []byte, results int) []string {
 	var hashes []string
 	re := regexp.MustCompile(SearchHref)
 	matches := re.FindAllString(string(response), -1)
-
+	os.WriteFile("response.html", response, 0644)
+	fmt.Println("matches = ", matches)
 	var counter int
 	for _, m := range matches {
 		if counter >= results {
@@ -367,36 +384,77 @@ func parseHashes(response []byte, results int) []string {
 	return hashes
 }
 
-// parseResponse takes in a slice of bytes and formats it
-// returns a Book object from the slice of bytes.
-func parseResponse(response []byte) (*Book, error) {
+// parseFileResponse parses the JSON response from object=f API.
+// Returns a Book with file-level fields and the edition ID for further lookup.
+func parseFileResponse(response []byte) (*Book, string, error) {
 	var book Book
-	var formattedResp []map[string]string
 
-	if err := json.Unmarshal(response, &formattedResp); err != nil {
-		return nil, err
+	// New format: {"file_id": {"md5": "...", "filesize": "...", "editions": {...}}}
+	var resp map[string]map[string]interface{}
+	if err := json.Unmarshal(response, &resp); err != nil {
+		return nil, "", err
+	}
+	if len(resp) == 0 {
+		return nil, "", errors.New("empty response or unexpected JSON")
 	}
 
-	if len(formattedResp) == 0 {
-		return nil, errors.New("empty response or unexpected JSON")
+	var editionID string
+	for id, item := range resp {
+		str := func(key string) string {
+			if v, ok := item[key]; ok {
+				return fmt.Sprint(v)
+			}
+			return ""
+		}
+		book.ID = id
+		book.Filesize = str("filesize")
+		book.Extension = str("extension")
+		book.Md5 = str("md5")
+		book.Pages = str("pages")
+
+		// Extract edition ID from nested editions object
+		if editions, ok := item["editions"]; ok {
+			if edMap, ok := editions.(map[string]interface{}); ok {
+				for _, ev := range edMap {
+					if edInfo, ok := ev.(map[string]interface{}); ok {
+						if eid, ok := edInfo["e_id"]; ok {
+							editionID = fmt.Sprint(eid)
+						}
+					}
+					break // take the first edition
+				}
+			}
+		}
+		break // only take the first file entry
 	}
 
-	item := formattedResp[0]
+	return &book, editionID, nil
+}
 
-	book.ID = item["id"]
-	book.Title = item["title"]
-	book.Author = item["author"]
-	book.Filesize = item["filesize"]
-	book.Extension = item["extension"]
-	book.Md5 = item["md5"]
-	book.Year = item["year"]
-	book.Language = item["language"]
-	book.Pages = item["pages"]
-	book.Publisher = item["publisher"]
-	book.Edition = item["edition"]
-	book.CoverURL = item["coverurl"]
+// parseEditionResponse parses the JSON response from object=e API
+// and fills in the book metadata fields (title, author, year, etc.).
+func parseEditionResponse(response []byte, book *Book) {
+	var resp map[string]map[string]interface{}
+	if err := json.Unmarshal(response, &resp); err != nil {
+		return
+	}
 
-	return &book, nil
+	for _, item := range resp {
+		str := func(key string) string {
+			if v, ok := item[key]; ok {
+				return fmt.Sprint(v)
+			}
+			return ""
+		}
+		book.Title = str("title")
+		book.Author = str("author")
+		book.Year = str("year")
+		book.Language = str("language")
+		book.Publisher = str("publisher")
+		book.Edition = str("edition")
+		book.CoverURL = str("cover_url")
+		break
+	}
 }
 
 func printDetails(book *Book) error {
