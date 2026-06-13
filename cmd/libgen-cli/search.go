@@ -1,5 +1,6 @@
 // Copyright © 2019 Antoine Chiny <antoine.chiny@inria.fr>
 // Copyright © 2019 Ryan Ciehanski <ryan@ciehanski.com>
+// Copyright © 2026 Chunyou Peng <chunyoupeng@gmail.com>
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,6 +13,12 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modifications by Chunyou Peng (2026):
+//   - Fix promptui template: items are []string, so .ID/.Title field
+//     references and the stray %s in the Selected template never rendered.
+//   - Use the index returned by prompt.Run() to look up the selected book
+//     instead of comparing ANSI-colored strings, which was unreliable.
 
 package libgen_cli
 
@@ -151,9 +158,9 @@ var searchCmd = &cobra.Command{
 		}
 
 		promptTemplate := &promptui.SelectTemplates{
-			Active: `▸ {{ .ID | cyan | bold }}{{ if .Title }} ({{ .Title }}){{end}}`,
-			//Inactive: `  {{ .Title | cyan }}{{ if .Title }} ({{ .Title }}){{end}}`,
-			Selected: `{{ "✔" | green }} %s: {{ .ID | cyan }}{{ if .Title }} ({{ .Title }}){{end}}`,
+			Active:   `▸ {{ . }}`,
+			Inactive: `  {{ . }}`,
+			Selected: `{{ "✔" | green }} {{ . }}`,
 		}
 
 		prompt := promptui.Select{
@@ -184,19 +191,13 @@ var searchCmd = &cobra.Command{
 
 		fmt.Println(strings.Repeat("-", 80))
 
-		_, result, err := prompt.Run()
+		idx, _, err := prompt.Run()
 		if err != nil {
 			fmt.Print(err)
 			os.Exit(1)
 		}
 
-		var selectedBook libgen.Book
-		for i, b := range bookSelection {
-			if b == result {
-				selectedBook = *books[i]
-				break
-			}
-		}
+		selectedBook := *books[idx]
 
 		if selectedBook.Author == "" {
 			fmt.Printf("Download starting for: %s by N/A\n", selectedBook.Title)
