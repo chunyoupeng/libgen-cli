@@ -207,6 +207,7 @@ func GetDetails(options *GetDetailsOptions) ([]*Book, error) {
 		}
 		if len(options.Extension) > 0 {
 			validExtension := false
+			// 也就是说可以选择多个后缀，只要满足一个就可以
 			for _, ext := range options.Extension {
 				if ext == book.Extension {
 					validExtension = true

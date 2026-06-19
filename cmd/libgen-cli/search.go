@@ -54,6 +54,10 @@ var searchCmd = &cobra.Command{
 		}
 
 		// Get flags
+		interactive, err := cmd.Flags().GetBool("interactive")
+		if err != nil {
+			fmt.Printf("error getting interactive flag: %v\n", err)
+		}
 		results, err := cmd.Flags().GetInt("results")
 		if err != nil {
 			fmt.Printf("error getting results flag: %v\n", err)
@@ -157,84 +161,89 @@ var searchCmd = &cobra.Command{
 			bookSelection = append(bookSelection, selectChoice)
 		}
 
-		promptTemplate := &promptui.SelectTemplates{
-			Active:   `▸ {{ . }}`,
-			Inactive: `  {{ . }}`,
-			Selected: `{{ "✔" | green }} {{ . }}`,
-		}
 
-		prompt := promptui.Select{
-			Label:     "Select Book",
-			Items:     bookSelection,
-			Templates: promptTemplate,
-			Size:      results,
-			IsVimMode: false,
-			Keys: &promptui.SelectKeys{
-				Next: promptui.Key{
-					Code:    readline.CharNext,
-					Display: "↓ (j)",
-				},
-				Prev: promptui.Key{
-					Code:    readline.CharPrev,
-					Display: "↑ (k)",
-				},
-				PageUp: promptui.Key{
-					Code:    readline.CharForward,
-					Display: "→ (l)",
-				},
-				PageDown: promptui.Key{
-					Code:    readline.CharBackward,
-					Display: "← (h)",
-				},
-			},
-		}
 
-		fmt.Println(strings.Repeat("-", 80))
+		if interactive {
 
-		idx, _, err := prompt.Run()
-		if err != nil {
-			fmt.Print(err)
-			os.Exit(1)
-		}
-
-		selectedBook := *books[idx]
-
-		if selectedBook.Author == "" {
-			fmt.Printf("Download starting for: %s by N/A\n", selectedBook.Title)
-		} else {
-			fmt.Printf("Download starting for: %s by %s\n", selectedBook.Title, selectedBook.Author)
-		}
-
-		if err := libgen.GetDownloadURL(&selectedBook, useIpfs); err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
-		if useIpfs {
-			if err := libgen.DownloadBookIPFS(&selectedBook, output); err != nil {
-				fmt.Printf("error downloading %v: %v\n", selectedBook.Title, err)
-				os.Exit(1)
+			promptTemplate := &promptui.SelectTemplates{
+				Active:   `▸ {{ . }}`,
+				Inactive: `  {{ . }}`,
+				Selected: `{{ "✔" | green }} {{ . }}`,
 			}
-		} else {
-			if err := libgen.DownloadBook(&selectedBook, output); err != nil {
-				fmt.Printf("error downloading %v: %v\n", selectedBook.Title, err)
-				os.Exit(1)
-			}
-		}
 
-		if runtime.GOOS == "windows" {
-			_, err = fmt.Fprintf(color.Output, "%s %s by %s.%s", color.GreenString("[OK]"),
-				selectedBook.Title, selectedBook.Author, selectedBook.Extension)
+			prompt := promptui.Select{
+				Label:     "Select Book",
+				Items:     bookSelection,
+				Templates: promptTemplate,
+				Size:      results,
+				IsVimMode: false,
+				Keys: &promptui.SelectKeys{
+					Next: promptui.Key{
+						Code:    readline.CharNext,
+						Display: "↓ (j)",
+					},
+					Prev: promptui.Key{
+						Code:    readline.CharPrev,
+						Display: "↑ (k)",
+					},
+					PageUp: promptui.Key{
+						Code:    readline.CharForward,
+						Display: "→ (l)",
+					},
+					PageDown: promptui.Key{
+						Code:    readline.CharBackward,
+						Display: "← (h)",
+					},
+				},
+			}
+			fmt.Println(strings.Repeat("-", 80))
+			idx, _, err := prompt.Run()
 			if err != nil {
-				fmt.Printf("error writing to Windows os.Stdout: %v\n", err)
+				fmt.Print(err)
+				os.Exit(1)
 			}
-		} else {
-			fmt.Printf("%s %s by %s.%s\n", color.GreenString("[OK]"),
-				selectedBook.Title, selectedBook.Author, selectedBook.Extension)
+
+			selectedBook := *books[idx]
+
+			if selectedBook.Author == "" {
+				fmt.Printf("Download starting for: %s by N/A\n", selectedBook.Title)
+			} else {
+				fmt.Printf("Download starting for: %s by %s\n", selectedBook.Title, selectedBook.Author)
+			}
+
+			if err := libgen.GetDownloadURL(&selectedBook, useIpfs); err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
+			if useIpfs {
+				if err := libgen.DownloadBookIPFS(&selectedBook, output); err != nil {
+					fmt.Printf("error downloading %v: %v\n", selectedBook.Title, err)
+					os.Exit(1)
+				}
+			} else {
+				if err := libgen.DownloadBook(&selectedBook, output); err != nil {
+					fmt.Printf("error downloading %v: %v\n", selectedBook.Title, err)
+					os.Exit(1)
+				}
+			}
+
+			if runtime.GOOS == "windows" {
+				_, err = fmt.Fprintf(color.Output, "%s %s by %s.%s", color.GreenString("[OK]"),
+					selectedBook.Title, selectedBook.Author, selectedBook.Extension)
+				if err != nil {
+					fmt.Printf("error writing to Windows os.Stdout: %v\n", err)
+				}
+			} else {
+				fmt.Printf("%s %s by %s.%s\n", color.GreenString("[OK]"),
+					selectedBook.Title, selectedBook.Author, selectedBook.Extension)
+			}
 		}
 	},
 }
 
 func init() {
+	searchCmd.Flags().BoolP("interactive", "t", false, "controls wether "+
+		"go into interactive mode or not")
 	searchCmd.Flags().IntP("results", "r", 10, "controls how many "+
 		"query results are displayed.")
 	searchCmd.Flags().BoolP("require-author", "a", false, "controls "+
