@@ -90,7 +90,7 @@ var downloadCmd = &cobra.Command{
 
 			fmt.Println(strings.Repeat("-", 80))
 			fmt.Printf("Download started for: %s by %s\n", book.Title, book.Author)
-
+			// 这几个链接唯一的不同就是，正则表达式不同。
 			if err := libgen.GetDownloadURL(book, useIpfs); err != nil {
 				fmt.Printf("error getting download URL: %v\n", err)
 				os.Exit(1)
