@@ -50,17 +50,28 @@ var linkCmd = &cobra.Command{
 		if err != nil {
 			fmt.Printf("error getting ipfs-mirrors flag: %v\n", err)
 		}
+		mirror, err := cmd.Flags().GetString("mirror")
+		if err != nil {
+			fmt.Printf("error getting mirror flag: %v\n", err)
+		}
 
 		fmt.Printf("++ Retrieving download link for: %s\n", args[0])
 
-		searchMirror := libgen.GetWorkingMirror(libgen.SearchMirrors)
+		searchMirror, pinnedMirror, err := resolveSearchMirror(mirror)
+		if err != nil {
+			fmt.Printf("error selecting search mirror: %v\n", err)
+			os.Exit(1)
+		}
 		bookDetails, err := libgen.GetDetails(&libgen.GetDetailsOptions{
 			Hashes:       args,
 			SearchMirror: searchMirror,
 			Print:        false,
 		})
 		if err != nil {
-			// If error, try another mirror before exiting
+			// If error and no mirror was pinned, try another mirror before exiting
+			if pinnedMirror != nil {
+				log.Fatalf("error retrieving results from LibGen API: %v", err)
+			}
 			secondaryMirror := libgen.GetWorkingMirror(libgen.SearchMirrors)
 			for secondaryMirror == searchMirror {
 				secondaryMirror = libgen.GetWorkingMirror(libgen.SearchMirrors)
@@ -76,7 +87,7 @@ var linkCmd = &cobra.Command{
 		}
 		book := bookDetails[0]
 
-		if err := libgen.GetDownloadURL(book, useIpfs); err != nil {
+		if err := libgen.GetDownloadURL(book, useIpfs, pinnedMirror); err != nil {
 			fmt.Printf("error getting download URL: %v\n", err)
 			os.Exit(1)
 		}
@@ -88,4 +99,6 @@ var linkCmd = &cobra.Command{
 func init() {
 	linkCmd.Flags().BoolP("ipfs-mirrors", "i", false, "enforces libgen-cli to download "+
 		"results via IPFS mirrors instead of HTTP(S) mirrors.")
+	linkCmd.Flags().StringP("mirror", "m", "", "pin a specific search mirror "+
+		"by host (e.g. libgen.li) instead of auto-selecting one. run 'libgen status -m search' to list mirrors.")
 }

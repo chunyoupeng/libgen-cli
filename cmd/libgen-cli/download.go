@@ -57,6 +57,10 @@ var downloadCmd = &cobra.Command{
 		if err != nil {
 			fmt.Printf("error getting ipfs-mirrors flag: %v\n", err)
 		}
+		mirror, err := cmd.Flags().GetString("mirror")
+		if err != nil {
+			fmt.Printf("error getting mirror flag: %v\n", err)
+		}
 
 		if len(args) == 1 {
 			fmt.Printf("++ Searching for: %s\n", args[0])
@@ -64,14 +68,21 @@ var downloadCmd = &cobra.Command{
 			fmt.Printf("++ Searching for: MD5s\n")
 		}
 
-		searchMirror := libgen.GetWorkingMirror(libgen.SearchMirrors)
+		searchMirror, pinnedMirror, err := resolveSearchMirror(mirror)
+		if err != nil {
+			fmt.Printf("error selecting search mirror: %v\n", err)
+			os.Exit(1)
+		}
 		bookDetails, err := libgen.GetDetails(&libgen.GetDetailsOptions{
 			Hashes:       args,
 			SearchMirror: searchMirror,
 			Print:        true,
 		})
 		if err != nil {
-			// If error, try another mirror before exiting
+			// If error and no mirror was pinned, try another mirror before exiting
+			if pinnedMirror != nil {
+				log.Fatalf("error retrieving results from LibGen API: %v", err)
+			}
 			secondaryMirror := libgen.GetWorkingMirror(libgen.SearchMirrors)
 			for secondaryMirror == searchMirror {
 				secondaryMirror = libgen.GetWorkingMirror(libgen.SearchMirrors)
@@ -91,7 +102,7 @@ var downloadCmd = &cobra.Command{
 			fmt.Println(strings.Repeat("-", 80))
 			fmt.Printf("Download started for: %s by %s\n", book.Title, book.Author)
 			// 这几个链接唯一的不同就是，正则表达式不同。
-			if err := libgen.GetDownloadURL(book, useIpfs); err != nil {
+			if err := libgen.GetDownloadURL(book, useIpfs, pinnedMirror); err != nil {
 				fmt.Printf("error getting download URL: %v\n", err)
 				os.Exit(1)
 			}
@@ -129,4 +140,6 @@ func init() {
 		"libgen-cli to save your download.")
 	downloadCmd.Flags().BoolP("ipfs-mirrors", "i", false, "enforces libgen-cli to download "+
 		"results via IPFS mirrors instead of HTTP(S) mirrors.")
+	downloadCmd.Flags().StringP("mirror", "m", "", "pin a specific search mirror "+
+		"by host (e.g. libgen.li) instead of auto-selecting one. run 'libgen status -m search' to list mirrors.")
 }

@@ -22,6 +22,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -83,9 +84,13 @@ func DownloadBook(book *Book, outputPath string) error {
 // GetDownloadURL picks a download mirror to download the specified
 // resource from. First tries the search mirror's ads.php page, then
 // falls back to legacy download mirrors.
-func GetDownloadURL(book *Book, useIpfs bool) error {
+// GetDownloadURL resolves book.DownloadURL. If searchMirror is non-nil it is
+// used as the search mirror for the primary ads.php lookup; otherwise a random
+// working search mirror is chosen. The library.lol/libgen.pm fallback is always
+// automatic.
+func GetDownloadURL(book *Book, useIpfs bool, searchMirror *url.URL) error {
 	// Try getting download URL from search mirror's ads.php page first
-	if err := getSearchMirrorURL(book); err == nil && book.DownloadURL != "" {
+	if err := getSearchMirrorURL(book, searchMirror); err == nil && book.DownloadURL != "" {
 		return nil
 	}
 
@@ -137,8 +142,13 @@ func GetDownloadURL(book *Book, useIpfs bool) error {
 
 // getSearchMirrorURL extracts the download URL from the search mirror's
 // ads.php page, which contains a direct get.php download link.
-func getSearchMirrorURL(book *Book) error {
-	mirror := GetWorkingMirror(SearchMirrors)
+func getSearchMirrorURL(book *Book, pinned *url.URL) error {
+	var mirror url.URL
+	if pinned != nil {
+		mirror = *pinned
+	} else {
+		mirror = GetWorkingMirror(SearchMirrors)
+	}
 	mirror.Path = "ads.php"
 	q := mirror.Query()
 	q.Set("md5", book.Md5)

@@ -14,7 +14,41 @@
 
 package libgen
 
-import "net/url"
+import (
+	"fmt"
+	"net/url"
+	"strings"
+)
+
+// MirrorHosts returns the host names of every mirror in the provided list.
+func MirrorHosts(mirrors []url.URL) []string {
+	hosts := make([]string, len(mirrors))
+	for i, m := range mirrors {
+		hosts[i] = m.Host
+	}
+	return hosts
+}
+
+// MirrorByHost returns the mirror from the list whose host matches the given
+// host (case-insensitive). The host may be a bare host like "libgen.li" or a
+// full URL like "https://libgen.li"; a leading "www." is ignored. An error is
+// returned, listing the available hosts, when no mirror matches.
+func MirrorByHost(mirrors []url.URL, host string) (url.URL, error) {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if strings.Contains(h, "://") {
+		if u, err := url.Parse(h); err == nil && u.Host != "" {
+			h = u.Host
+		}
+	}
+	h = strings.TrimPrefix(h, "www.")
+	for _, m := range mirrors {
+		if strings.ToLower(m.Host) == h {
+			return m, nil
+		}
+	}
+	return url.URL{}, fmt.Errorf("mirror %q not found; available: %s",
+		host, strings.Join(MirrorHosts(mirrors), ", "))
+}
 
 // SearchMirrors contains all valid and tested mirrors used for
 // querying against Library Genesis.
@@ -42,6 +76,11 @@ var SearchMirrors = []url.URL{
 	{
 		Scheme: "https",
 		Host:   "libgen.is",
+		Path:   "index.php",
+	},
+	{
+		Scheme: "https",
+		Host:   "libgen.la",
 		Path:   "index.php",
 	},
 	{

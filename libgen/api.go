@@ -24,7 +24,6 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -82,7 +81,7 @@ type GetDetailsOptions struct {
 	SortBy        string
 }
 
-// Search sends a query to the search.php page hosted by gen.lib.rus.ec(or any
+// Search sends a query to the index.php page hosted by gen.lib.rus.ec(or any
 // similar mirror) and then provides the web page's contents provided from the
 // resulting http request to the parseHashes() function to extract the specific
 // hashes of matches found from the search query provided.
@@ -135,7 +134,7 @@ func Search(options *SearchOptions) ([]*Book, error) {
 		setSortASC(q, options.SortASC)
 	}
 	options.SearchMirror.RawQuery = q.Encode()
-	fmt.Println("options.SearchMirror.String() = ", options.SearchMirror.String())
+	// fmt.Println("options.SearchMirror.String() = ", options.SearchMirror.String())
 	b, err := getBody(options.SearchMirror.String())
 	if err != nil {
 		return nil, err
@@ -367,8 +366,8 @@ func parseHashes(response []byte, results int) []string {
 	var hashes []string
 	re := regexp.MustCompile(SearchHref)
 	matches := re.FindAllString(string(response), -1)
-	os.WriteFile("response.html", response, 0644)
-	fmt.Println("matches = ", matches)
+	// os.WriteFile("response.html", response, 0644)
+	// fmt.Println("matches = ", matches)
 	var counter int
 	for _, m := range matches {
 		if counter >= results {
@@ -470,8 +469,8 @@ func printDetails(book *Book) error {
 	// Print separation lines
 	fmt.Println(strings.Repeat("-", 80))
 
-	// Print ID + Title
-	fTitle := fmt.Sprintf("%5s %s", color.New(color.FgHiBlue).Sprintf(book.ID), book.Title)
+	// Print md5 + Title
+	fTitle := fmt.Sprintf("MD5: %5s %s", color.New(color.FgHiBlue).Sprintf(book.Md5), book.Title)
 	fTitle = formatTitle(fTitle, TitleMaxLength)
 	if runtime.GOOS == "windows" {
 		_, err = fmt.Fprintf(color.Output, "%s\n    ++ ", fTitle)

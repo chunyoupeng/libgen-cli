@@ -98,6 +98,10 @@ var searchCmd = &cobra.Command{
 		if err != nil {
 			fmt.Printf("error getting sort-asc flag: %v\n", err)
 		}
+		mirror, err := cmd.Flags().GetString("mirror")
+		if err != nil {
+			fmt.Printf("error getting mirror flag: %v\n", err)
+		}
 
 		// Join args for complete search query in case
 		// it contains spaces
@@ -105,7 +109,7 @@ var searchCmd = &cobra.Command{
 		fmt.Printf("++ Searching for: %s\n", searchQuery)
 
 		var books []*libgen.Book
-		searchMirror, err := libgen.FindWorkingMirror(libgen.SearchMirrors)
+		searchMirror, pinnedMirror, err := resolveSearchMirror(mirror)
 		if err != nil {
 			fmt.Printf("error selecting search mirror: %v\n", err)
 			os.Exit(1)
@@ -211,7 +215,7 @@ var searchCmd = &cobra.Command{
 				fmt.Printf("Download starting for: %s by %s\n", selectedBook.Title, selectedBook.Author)
 			}
 
-			if err := libgen.GetDownloadURL(&selectedBook, useIpfs); err != nil {
+			if err := libgen.GetDownloadURL(&selectedBook, useIpfs, pinnedMirror); err != nil {
 				fmt.Println(err)
 				os.Exit(1)
 			}
@@ -264,4 +268,6 @@ func init() {
 		"by the specified string. (id, title, author, pub, year, lang, size, ext)")
 	searchCmd.Flags().Bool("sort-asc", true, "sorts the queried results "+
 		"by ascension or descension.")
+	searchCmd.Flags().StringP("mirror", "m", "", "pin a specific search mirror "+
+		"by host (e.g. libgen.li) instead of auto-selecting one. run 'libgen status -m search' to list mirrors.")
 }

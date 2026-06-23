@@ -47,7 +47,7 @@ func TestGetDownloadIPFSURL(t *testing.T) {
 		t.Error(err)
 	}
 
-	if err := GetDownloadURL(book[0], true); err != nil {
+	if err := GetDownloadURL(book[0], true, nil); err != nil {
 		t.Error(err)
 	}
 	if book[0].DownloadURL == "" {

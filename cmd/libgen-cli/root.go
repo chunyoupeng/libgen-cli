@@ -18,12 +18,29 @@ package libgen_cli
 import (
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/chunyoupeng/libgen-cli/libgen"
 )
+
+// resolveSearchMirror picks the search mirror to use. When mirrorHost is
+// non-empty it pins that specific mirror (and returns a non-nil pointer so the
+// download step uses the same one); otherwise it returns a random working
+// mirror and a nil pointer (automatic selection downstream).
+func resolveSearchMirror(mirrorHost string) (url.URL, *url.URL, error) {
+	if mirrorHost != "" {
+		m, err := libgen.MirrorByHost(libgen.SearchMirrors, mirrorHost)
+		if err != nil {
+			return url.URL{}, nil, err
+		}
+		return m, &m, nil
+	}
+	m, err := libgen.FindWorkingMirror(libgen.SearchMirrors)
+	return m, nil, err
+}
 
 var rootValidArgs = []string{"dbdumps", "download", "download-all", "link", "search", "status", "version"}
 

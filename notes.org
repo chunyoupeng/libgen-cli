@@ -1,0 +1,18 @@
+#+title: Notes
+
+*** Search
+** Flow
+- cmd/search: Call api/search and Show UI selector
+- api/search: Given search options, return Books
+** api/search
+#+begin_src python
+Query(libgen.li/index.php?req=xxx) => html
+parseHashes(html) => hashes
+books = []
+for hash in hashes:
+  p = Query(libgen.li/json.php?object=f&md5=xxx)
+  eid = parseJsonResponse(p) # eid menas 3 beijing publisher 1999 etc. can have many md5
+  book = Query(libgen.li/json.php?object=e&xxx)
+  books += book
+#+end_src
+so totally 1 + 2n
