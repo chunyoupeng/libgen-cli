@@ -1,5 +1,6 @@
 // Copyright © 2019 Antoine Chiny <antoine.chiny@inria.fr>
 // Copyright © 2019 Ryan Ciehanski <ryan@ciehanski.com>
+// Copyright © 2026 Chunyou Peng <chunyoupeng@gmail.com>
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,6 +13,12 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modifications by Chunyou Peng (2026):
+//   - Fix promptui template: items are []string, so .ID/.Title field
+//     references and the stray %s in the Selected template never rendered.
+//   - Use the index returned by prompt.Run() to look up the selected book
+//     instead of comparing ANSI-colored strings, which was unreliable.
 
 package libgen_cli
 
@@ -28,7 +35,7 @@ import (
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 
-	"github.com/ciehanski/libgen-cli/libgen"
+	"github.com/chunyoupeng/libgen-cli/libgen"
 )
 
 // searchCmd represents the search command
@@ -47,6 +54,10 @@ var searchCmd = &cobra.Command{
 		}
 
 		// Get flags
+		interactive, err := cmd.Flags().GetBool("interactive")
+		if err != nil {
+			fmt.Printf("error getting interactive flag: %v\n", err)
+		}
 		results, err := cmd.Flags().GetInt("results")
 		if err != nil {
 			fmt.Printf("error getting results flag: %v\n", err)
@@ -87,6 +98,10 @@ var searchCmd = &cobra.Command{
 		if err != nil {
 			fmt.Printf("error getting sort-asc flag: %v\n", err)
 		}
+		mirror, err := cmd.Flags().GetString("mirror")
+		if err != nil {
+			fmt.Printf("error getting mirror flag: %v\n", err)
+		}
 
 		// Join args for complete search query in case
 		// it contains spaces
@@ -94,7 +109,11 @@ var searchCmd = &cobra.Command{
 		fmt.Printf("++ Searching for: %s\n", searchQuery)
 
 		var books []*libgen.Book
-		var searchMirror = libgen.GetWorkingMirror(libgen.SearchMirrors)
+		searchMirror, pinnedMirror, err := resolveSearchMirror(mirror)
+		if err != nil {
+			fmt.Printf("error selecting search mirror: %v\n", err)
+			os.Exit(1)
+		}
 		books, err = libgen.Search(&libgen.SearchOptions{
 			Query:         searchQuery,
 			SearchMirror:  searchMirror,
@@ -146,90 +165,89 @@ var searchCmd = &cobra.Command{
 			bookSelection = append(bookSelection, selectChoice)
 		}
 
-		promptTemplate := &promptui.SelectTemplates{
-			Active: `▸ {{ .ID | cyan | bold }}{{ if .Title }} ({{ .Title }}){{end}}`,
-			//Inactive: `  {{ .Title | cyan }}{{ if .Title }} ({{ .Title }}){{end}}`,
-			Selected: `{{ "✔" | green }} %s: {{ .ID | cyan }}{{ if .Title }} ({{ .Title }}){{end}}`,
-		}
 
-		prompt := promptui.Select{
-			Label:     "Select Book",
-			Items:     bookSelection,
-			Templates: promptTemplate,
-			Size:      results,
-			IsVimMode: false,
-			Keys: &promptui.SelectKeys{
-				Next: promptui.Key{
-					Code:    readline.CharNext,
-					Display: "↓ (j)",
-				},
-				Prev: promptui.Key{
-					Code:    readline.CharPrev,
-					Display: "↑ (k)",
-				},
-				PageUp: promptui.Key{
-					Code:    readline.CharForward,
-					Display: "→ (l)",
-				},
-				PageDown: promptui.Key{
-					Code:    readline.CharBackward,
-					Display: "← (h)",
-				},
-			},
-		}
 
-		fmt.Println(strings.Repeat("-", 80))
+		if interactive {
 
-		_, result, err := prompt.Run()
-		if err != nil {
-			fmt.Print(err)
-			os.Exit(1)
-		}
-
-		var selectedBook libgen.Book
-		for i, b := range bookSelection {
-			if b == result {
-				selectedBook = *books[i]
-				break
+			promptTemplate := &promptui.SelectTemplates{
+				Active:   `▸ {{ . }}`,
+				Inactive: `  {{ . }}`,
+				Selected: `{{ "✔" | green }} {{ . }}`,
 			}
-		}
 
-		if selectedBook.Author == "" {
-			fmt.Printf("Download starting for: %s by N/A\n", selectedBook.Title)
-		} else {
-			fmt.Printf("Download starting for: %s by %s\n", selectedBook.Title, selectedBook.Author)
-		}
-
-		if err := libgen.GetDownloadURL(&selectedBook, useIpfs); err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
-		if useIpfs {
-			if err := libgen.DownloadBookIPFS(&selectedBook, output); err != nil {
-				fmt.Printf("error downloading %v: %v\n", selectedBook.Title, err)
-				os.Exit(1)
+			prompt := promptui.Select{
+				Label:     "Select Book",
+				Items:     bookSelection,
+				Templates: promptTemplate,
+				Size:      results,
+				IsVimMode: false,
+				Keys: &promptui.SelectKeys{
+					Next: promptui.Key{
+						Code:    readline.CharNext,
+						Display: "↓ (j)",
+					},
+					Prev: promptui.Key{
+						Code:    readline.CharPrev,
+						Display: "↑ (k)",
+					},
+					PageUp: promptui.Key{
+						Code:    readline.CharForward,
+						Display: "→ (l)",
+					},
+					PageDown: promptui.Key{
+						Code:    readline.CharBackward,
+						Display: "← (h)",
+					},
+				},
 			}
-		} else {
-			if err := libgen.DownloadBook(&selectedBook, output); err != nil {
-				fmt.Printf("error downloading %v: %v\n", selectedBook.Title, err)
-				os.Exit(1)
-			}
-		}
-
-		if runtime.GOOS == "windows" {
-			_, err = fmt.Fprintf(color.Output, "%s %s by %s.%s", color.GreenString("[OK]"),
-				selectedBook.Title, selectedBook.Author, selectedBook.Extension)
+			fmt.Println(strings.Repeat("-", 80))
+			idx, _, err := prompt.Run()
 			if err != nil {
-				fmt.Printf("error writing to Windows os.Stdout: %v\n", err)
+				fmt.Print(err)
+				os.Exit(1)
 			}
-		} else {
-			fmt.Printf("%s %s by %s.%s\n", color.GreenString("[OK]"),
-				selectedBook.Title, selectedBook.Author, selectedBook.Extension)
+
+			selectedBook := *books[idx]
+
+			if selectedBook.Author == "" {
+				fmt.Printf("Download starting for: %s by N/A\n", selectedBook.Title)
+			} else {
+				fmt.Printf("Download starting for: %s by %s\n", selectedBook.Title, selectedBook.Author)
+			}
+
+			if err := libgen.GetDownloadURL(&selectedBook, useIpfs, pinnedMirror); err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
+			if useIpfs {
+				if err := libgen.DownloadBookIPFS(&selectedBook, output); err != nil {
+					fmt.Printf("error downloading %v: %v\n", selectedBook.Title, err)
+					os.Exit(1)
+				}
+			} else {
+				if err := libgen.DownloadBook(&selectedBook, output); err != nil {
+					fmt.Printf("error downloading %v: %v\n", selectedBook.Title, err)
+					os.Exit(1)
+				}
+			}
+
+			if runtime.GOOS == "windows" {
+				_, err = fmt.Fprintf(color.Output, "%s %s by %s.%s", color.GreenString("[OK]"),
+					selectedBook.Title, selectedBook.Author, selectedBook.Extension)
+				if err != nil {
+					fmt.Printf("error writing to Windows os.Stdout: %v\n", err)
+				}
+			} else {
+				fmt.Printf("%s %s by %s.%s\n", color.GreenString("[OK]"),
+					selectedBook.Title, selectedBook.Author, selectedBook.Extension)
+			}
 		}
 	},
 }
 
 func init() {
+	searchCmd.Flags().BoolP("interactive", "t", false, "controls wether "+
+		"go into interactive mode or not")
 	searchCmd.Flags().IntP("results", "r", 10, "controls how many "+
 		"query results are displayed.")
 	searchCmd.Flags().BoolP("require-author", "a", false, "controls "+
@@ -250,4 +268,6 @@ func init() {
 		"by the specified string. (id, title, author, pub, year, lang, size, ext)")
 	searchCmd.Flags().Bool("sort-asc", true, "sorts the queried results "+
 		"by ascension or descension.")
+	searchCmd.Flags().StringP("mirror", "m", "", "pin a specific search mirror "+
+		"by host (e.g. libgen.li) instead of auto-selecting one. run 'libgen status -m search' to list mirrors.")
 }

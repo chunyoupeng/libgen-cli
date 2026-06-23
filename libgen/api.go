@@ -81,7 +81,7 @@ type GetDetailsOptions struct {
 	SortBy        string
 }
 
-// Search sends a query to the search.php page hosted by gen.lib.rus.ec(or any
+// Search sends a query to the index.php page hosted by gen.lib.rus.ec(or any
 // similar mirror) and then provides the web page's contents provided from the
 // resulting http request to the parseHashes() function to extract the specific
 // hashes of matches found from the search query provided.
@@ -134,7 +134,7 @@ func Search(options *SearchOptions) ([]*Book, error) {
 		setSortASC(q, options.SortASC)
 	}
 	options.SearchMirror.RawQuery = q.Encode()
-
+	// fmt.Println("options.SearchMirror.String() = ", options.SearchMirror.String())
 	b, err := getBody(options.SearchMirror.String())
 	if err != nil {
 		return nil, err
@@ -169,10 +169,11 @@ func GetDetails(options *GetDetailsOptions) ([]*Book, error) {
 
 	// For each hash found on the page, parse it into a Book struct
 	for _, hash := range options.Hashes {
+		// Step 1: Get file info (filesize, extension, pages, md5, edition ID)
 		options.SearchMirror.Path = "json.php"
 		q := options.SearchMirror.Query()
-		q.Set("ids", hash)
-		q.Set("fields", JSONQuery)
+		q.Set("object", "f")
+		q.Set("md5", hash)
 		options.SearchMirror.RawQuery = q.Encode()
 
 		b, err := getBody(options.SearchMirror.String())
@@ -180,9 +181,23 @@ func GetDetails(options *GetDetailsOptions) ([]*Book, error) {
 			return nil, err
 		}
 
-		book, err := parseResponse(b)
+		book, editionID, err := parseFileResponse(b)
 		if err != nil {
-			return nil, err
+			continue
+		}
+
+		// Step 2: Get edition info (title, author, year, publisher, language)
+		if editionID != "" {
+			options.SearchMirror.Path = "json.php"
+			q = options.SearchMirror.Query()
+			q.Set("object", "e")
+			q.Set("ids", editionID)
+			options.SearchMirror.RawQuery = q.Encode()
+
+			eb, err := getBody(options.SearchMirror.String())
+			if err == nil {
+				parseEditionResponse(eb, book)
+			}
 		}
 
 		// Flag filters
@@ -191,6 +206,7 @@ func GetDetails(options *GetDetailsOptions) ([]*Book, error) {
 		}
 		if len(options.Extension) > 0 {
 			validExtension := false
+			// 也就是说可以选择多个后缀，只要满足一个就可以
 			for _, ext := range options.Extension {
 				if ext == book.Extension {
 					validExtension = true
@@ -223,7 +239,7 @@ func GetDetails(options *GetDetailsOptions) ([]*Book, error) {
 			}
 		}
 		if options.Language != "" {
-			if strings.ToLower(book.Language) != strings.ToLower(options.Language) {
+			if !strings.EqualFold(book.Language, options.Language) {
 				continue
 			}
 		}
@@ -242,6 +258,14 @@ func GetDetails(options *GetDetailsOptions) ([]*Book, error) {
 
 // CheckMirror returns the HTTP status code of the DownloadURL provided.
 func CheckMirror(url url.URL) int {
+	status, err := probeMirror(url)
+	if err != nil {
+		return http.StatusBadGateway
+	}
+	return status
+}
+
+func probeMirror(url url.URL) (int, error) {
 	client := http.Client{
 		Timeout: HTTPClientTimeout,
 		Transport: &http.Transport{
@@ -250,29 +274,49 @@ func CheckMirror(url url.URL) int {
 		}}
 	r, err := client.Get(url.String())
 	if err != nil {
-		return http.StatusBadGateway
+		return http.StatusBadGateway, err
 	}
 	if r.StatusCode != http.StatusOK {
-		return r.StatusCode
+		return r.StatusCode, nil
 	}
-	return http.StatusOK
+	return http.StatusOK, nil
 }
 
 // GetWorkingMirror selects a random mirror from the []url.DownloadURL
 // provided and checks the mirror for a proper HTTP status code
 // for working order.
 func GetWorkingMirror(urls []url.URL) url.URL {
-	var mirror url.URL
+	mirror, err := FindWorkingMirror(urls)
+	if err != nil {
+		return url.URL{}
+	}
+	return mirror
+}
 
-	for {
-		randMirror := urls[rand.Intn(len(urls))]
-		if CheckMirror(randMirror) == http.StatusOK {
-			mirror = randMirror
-			break
-		}
+// FindWorkingMirror checks each mirror at most once in random order and
+// returns the first mirror that responds with HTTP 200.
+func FindWorkingMirror(urls []url.URL) (url.URL, error) {
+	var mirror url.URL
+	if len(urls) == 0 {
+		return mirror, errors.New("no mirrors configured")
 	}
 
-	return mirror
+	var failures []string
+	for _, i := range rand.Perm(len(urls)) {
+		randMirror := urls[i]
+		status, err := probeMirror(randMirror)
+		if err == nil && status == http.StatusOK {
+			return randMirror, nil
+		}
+
+		reason := fmt.Sprintf("HTTP %d", status)
+		if err != nil {
+			reason = err.Error()
+		}
+		failures = append(failures, fmt.Sprintf("%s: %s", randMirror.String(), reason))
+	}
+
+	return mirror, fmt.Errorf("no working mirrors found (%d checked): %s", len(urls), strings.Join(failures, "; "))
 }
 
 // ParseDbdumps takes in a HTTP response and scans it for
@@ -322,7 +366,8 @@ func parseHashes(response []byte, results int) []string {
 	var hashes []string
 	re := regexp.MustCompile(SearchHref)
 	matches := re.FindAllString(string(response), -1)
-
+	// os.WriteFile("response.html", response, 0644)
+	// fmt.Println("matches = ", matches)
 	var counter int
 	for _, m := range matches {
 		if counter >= results {
@@ -339,36 +384,77 @@ func parseHashes(response []byte, results int) []string {
 	return hashes
 }
 
-// parseResponse takes in a slice of bytes and formats it
-// returns a Book object from the slice of bytes.
-func parseResponse(response []byte) (*Book, error) {
+// parseFileResponse parses the JSON response from object=f API.
+// Returns a Book with file-level fields and the edition ID for further lookup.
+func parseFileResponse(response []byte) (*Book, string, error) {
 	var book Book
-	var formattedResp []map[string]string
 
-	if err := json.Unmarshal(response, &formattedResp); err != nil {
-		return nil, err
+	// New format: {"file_id": {"md5": "...", "filesize": "...", "editions": {...}}}
+	var resp map[string]map[string]interface{}
+	if err := json.Unmarshal(response, &resp); err != nil {
+		return nil, "", err
+	}
+	if len(resp) == 0 {
+		return nil, "", errors.New("empty response or unexpected JSON")
 	}
 
-	if len(formattedResp) == 0 {
-		return nil, errors.New("empty response or unexpected JSON")
+	var editionID string
+	for id, item := range resp {
+		str := func(key string) string {
+			if v, ok := item[key]; ok {
+				return fmt.Sprint(v)
+			}
+			return ""
+		}
+		book.ID = id
+		book.Filesize = str("filesize")
+		book.Extension = str("extension")
+		book.Md5 = str("md5")
+		book.Pages = str("pages")
+
+		// Extract edition ID from nested editions object
+		if editions, ok := item["editions"]; ok {
+			if edMap, ok := editions.(map[string]interface{}); ok {
+				for _, ev := range edMap {
+					if edInfo, ok := ev.(map[string]interface{}); ok {
+						if eid, ok := edInfo["e_id"]; ok {
+							editionID = fmt.Sprint(eid)
+						}
+					}
+					break // take the first edition
+				}
+			}
+		}
+		break // only take the first file entry
 	}
 
-	item := formattedResp[0]
+	return &book, editionID, nil
+}
 
-	book.ID = item["id"]
-	book.Title = item["title"]
-	book.Author = item["author"]
-	book.Filesize = item["filesize"]
-	book.Extension = item["extension"]
-	book.Md5 = item["md5"]
-	book.Year = item["year"]
-	book.Language = item["language"]
-	book.Pages = item["pages"]
-	book.Publisher = item["publisher"]
-	book.Edition = item["edition"]
-	book.CoverURL = item["coverurl"]
+// parseEditionResponse parses the JSON response from object=e API
+// and fills in the book metadata fields (title, author, year, etc.).
+func parseEditionResponse(response []byte, book *Book) {
+	var resp map[string]map[string]interface{}
+	if err := json.Unmarshal(response, &resp); err != nil {
+		return
+	}
 
-	return &book, nil
+	for _, item := range resp {
+		str := func(key string) string {
+			if v, ok := item[key]; ok {
+				return fmt.Sprint(v)
+			}
+			return ""
+		}
+		book.Title = str("title")
+		book.Author = str("author")
+		book.Year = str("year")
+		book.Language = str("language")
+		book.Publisher = str("publisher")
+		book.Edition = str("edition")
+		book.CoverURL = str("cover_url")
+		break
+	}
 }
 
 func printDetails(book *Book) error {
@@ -383,8 +469,8 @@ func printDetails(book *Book) error {
 	// Print separation lines
 	fmt.Println(strings.Repeat("-", 80))
 
-	// Print ID + Title
-	fTitle := fmt.Sprintf("%5s %s", color.New(color.FgHiBlue).Sprintf(book.ID), book.Title)
+	// Print md5 + Title
+	fTitle := fmt.Sprintf("MD5: %5s %s", color.New(color.FgHiBlue).Sprintf(book.Md5), book.Title)
 	fTitle = formatTitle(fTitle, TitleMaxLength)
 	if runtime.GOOS == "windows" {
 		_, err = fmt.Fprintf(color.Output, "%s\n    ++ ", fTitle)

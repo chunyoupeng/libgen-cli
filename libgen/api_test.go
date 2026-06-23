@@ -15,8 +15,6 @@
 package libgen
 
 import (
-	"io/ioutil"
-	"net/http"
 	"strings"
 	"testing"
 )
@@ -1225,31 +1223,6 @@ func TestParseHashes(t *testing.T) {
 	}
 	if hashes[4] != "E185937818FE3285AEDDF19B9A85EF9B" {
 		t.Errorf("got: %s, expected: E185937818FE3285AEDDF19B9A85EF9B", hashes[4])
-	}
-}
-
-func TestParseResponse(t *testing.T) {
-	// Test on 2F2DBA2A621B693BB95601C16ED680F8
-	searchMirror := GetWorkingMirror(SearchMirrors)
-
-	searchMirror.Path = "json.php"
-	q := searchMirror.Query()
-	q.Set("ids", "2F2DBA2A621B693BB95601C16ED680F8")
-	q.Set("fields", JSONQuery)
-	searchMirror.RawQuery = q.Encode()
-
-	r, _ := http.Get(searchMirror.String())
-	b, _ := ioutil.ReadAll(r.Body)
-
-	book, err := parseResponse(b)
-	if err != nil {
-		t.Error(err)
-	}
-	if book.Md5 != "2f2dba2a621b693bb95601c16ed680f8" {
-		t.Error("incorrect MD5")
-	}
-	if book.Author != "Larry J. Crockett" {
-		t.Error("incorrect author")
 	}
 }
 

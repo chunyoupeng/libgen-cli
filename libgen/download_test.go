@@ -47,7 +47,7 @@ func TestGetDownloadURL(t *testing.T) {
 		t.Error(err)
 	}
 
-	if err := GetDownloadURL(book[0], false); err != nil {
+	if err := GetDownloadURL(book[0], false, nil); err != nil {
 		t.Error(err)
 	}
 	if book[0].DownloadURL == "" {

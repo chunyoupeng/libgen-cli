@@ -22,6 +22,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -80,9 +81,20 @@ func DownloadBook(book *Book, outputPath string) error {
 	return nil
 }
 
-// GetDownloadURL picks a random download mirror to download the specified
-// resource from.
-func GetDownloadURL(book *Book, useIpfs bool) error {
+// GetDownloadURL picks a download mirror to download the specified
+// resource from. First tries the search mirror's ads.php page, then
+// falls back to legacy download mirrors.
+// GetDownloadURL resolves book.DownloadURL. If searchMirror is non-nil it is
+// used as the search mirror for the primary ads.php lookup; otherwise a random
+// working search mirror is chosen. The library.lol/libgen.pm fallback is always
+// automatic.
+func GetDownloadURL(book *Book, useIpfs bool, searchMirror *url.URL) error {
+	// Try getting download URL from search mirror's ads.php page first
+	if err := getSearchMirrorURL(book, searchMirror); err == nil && book.DownloadURL != "" {
+		return nil
+	}
+
+	// Fallback to legacy download mirrors
 	chosenMirror := DownloadMirrors[rand.Intn(len(DownloadMirrors))]
 
 	var x int
@@ -128,10 +140,48 @@ func GetDownloadURL(book *Book, useIpfs bool) error {
 	return nil
 }
 
+// getSearchMirrorURL extracts the download URL from the search mirror's
+// ads.php page, which contains a direct get.php download link.
+func getSearchMirrorURL(book *Book, pinned *url.URL) error {
+	var mirror url.URL
+	if pinned != nil {
+		mirror = *pinned
+	} else {
+		mirror = GetWorkingMirror(SearchMirrors)
+	}
+	mirror.Path = "ads.php"
+	q := mirror.Query()
+	q.Set("md5", book.Md5)
+	mirror.RawQuery = q.Encode()
+
+	book.PageURL = mirror.String()
+
+	b, err := getBody(mirror.String())
+	if err != nil {
+		return err
+	}
+
+	// Match the get.php download link
+	re := regexp.MustCompile(`get\.php\?md5=\w{32}&key=\w{16}`)
+	match := re.FindString(string(b))
+	if match == "" {
+		return errors.New("no valid download URL found on ads.php page")
+	}
+
+	mirror.Path = match
+	mirror.RawQuery = ""
+	book.DownloadURL = mirror.Scheme + "://" + mirror.Host + "/" + match
+
+	return nil
+}
+
 // DownloadDbdump downloads the selected database dump from
 // Library Genesis.
 func DownloadDbdump(filename string, outputPath string) error {
-	mirror := GetWorkingMirror(DbdumpsMirrors)
+	mirror, err := FindWorkingMirror(DbdumpsMirrors)
+	if err != nil {
+		return err
+	}
 	client := http.Client{
 		Transport: &http.Transport{
 			Proxy:           http.ProxyFromEnvironment,
