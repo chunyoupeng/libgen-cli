@@ -1,4 +1,4 @@
-## libgen-cli [![Build & Test](https://github.com/chunyoupeng/libgen-cli/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/chunyoupeng/libgen-cli/actions/workflows/build.yml) [![Go Report Card](https://goreportcard.com/badge/github.com/chunyoupeng/libgen-cli)](https://goreportcard.com/report/github.com/chunyoupeng/libgen-cli)
+## libgen-cli [![Go Report Card](https://goreportcard.com/badge/github.com/chunyoupeng/libgen-cli)](https://goreportcard.com/report/github.com/chunyoupeng/libgen-cli)
 
 > A fork of [ciehanski/libgen-cli](https://github.com/ciehanski/libgen-cli) with extra
 > filtering/mirror flags and a [Claude Code / agent skill](#use-as-an-agent-skill).
