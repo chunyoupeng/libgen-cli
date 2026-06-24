@@ -1,4 +1,7 @@
-## libgen-cli [![Build & Test](https://github.com/ciehanski/libgen-cli/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/ciehanski/libgen-cli/actions/workflows/build.yml) [![Coverage Status](https://coveralls.io/repos/github/ciehanski/libgen-cli/badge.svg?branch=master)](https://coveralls.io/github/ciehanski/libgen-cli?branch=master) [![Go Report Card](https://goreportcard.com/badge/github.com/ciehanski/libgen-cli)](https://goreportcard.com/report/github.com/ciehanski/libgen-cli)
+## libgen-cli [![Build & Test](https://github.com/chunyoupeng/libgen-cli/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/chunyoupeng/libgen-cli/actions/workflows/build.yml) [![Go Report Card](https://goreportcard.com/badge/github.com/chunyoupeng/libgen-cli)](https://goreportcard.com/report/github.com/chunyoupeng/libgen-cli)
+
+> A fork of [ciehanski/libgen-cli](https://github.com/ciehanski/libgen-cli) with extra
+> filtering/mirror flags and a [Claude Code / agent skill](#use-as-an-agent-skill).
 
 libgen-cli is a command line interface application which allows users to
 quickly query the Library Genesis dataset and download any of its contents.
@@ -12,6 +15,7 @@ quickly query the Library Genesis dataset and download any of its contents.
 	- [Status](#status)
     - [Version](#version)
     - [Link](#link)
+- [Use as an agent skill](#use-as-an-agent-skill)
 - [Disclaimer](#disclaimer)
 - [License](#license)
 
@@ -26,7 +30,7 @@ If you have [Golang](https://golang.org) installed on your local machine you can
 commands belows to install it directly into your $GOPATH.
 
 ```bash
-$ go install github.com/ciehanski/libgen-cli@latest
+$ go install github.com/chunyoupeng/libgen-cli@latest
 ```
 
 ## Commands
@@ -238,6 +242,22 @@ Check the version of the installed libgen-cli client:
 ```bash
 $ libgen -v
 ```
+
+## Use as an agent skill
+
+This repo ships a [Claude Code](https://claude.com/claude-code) skill at
+[`skills/libgen/SKILL.md`](skills/libgen/SKILL.md) that lets an agent search and download
+books on your behalf. It bootstraps the binary itself (via `go install`), runs searches
+non-interactively, parses the MD5 hashes from the output, and downloads by MD5 — no TUI,
+no human in the loop.
+
+Enable it by linking the skill into your Claude skills directory:
+
+```bash
+ln -s "$(pwd)/skills/libgen" ~/.claude/skills/libgen
+```
+
+The agent will pick it up automatically whenever you ask it to find or download a book.
 
 ## Disclaimer
 
