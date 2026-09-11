@@ -103,6 +103,13 @@ var searchCmd = &cobra.Command{
 			fmt.Printf("error getting mirror flag: %v\n", err)
 		}
 
+		var cleanExt []string
+		for _, e := range extension {
+			if strings.TrimSpace(e) != "" {
+				cleanExt = append(cleanExt, strings.TrimSpace(e))
+			}
+		}
+
 		// Join args for complete search query in case
 		// it contains spaces
 		searchQuery := strings.Join(args, " ")
@@ -120,7 +127,7 @@ var searchCmd = &cobra.Command{
 			Results:       results,
 			Print:         true,
 			RequireAuthor: requireAuthor,
-			Extension:     extension,
+			Extension:     cleanExt,
 			Year:          year,
 			Publisher:     publisher,
 			Language:      language,

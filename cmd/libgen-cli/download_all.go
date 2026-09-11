@@ -86,6 +86,13 @@ var downloadAllCmd = &cobra.Command{
 			fmt.Printf("error getting mirror flag: %v\n", err)
 		}
 
+		var cleanExt []string
+		for _, e := range extension {
+			if strings.TrimSpace(e) != "" {
+				cleanExt = append(cleanExt, strings.TrimSpace(e))
+			}
+		}
+
 		// Join args for complete search query in case
 		// it contains spaces
 		searchQuery := strings.Join(args, " ")
@@ -102,7 +109,7 @@ var downloadAllCmd = &cobra.Command{
 			SearchMirror:  searchMirror,
 			Results:       results,
 			RequireAuthor: requireAuthor,
-			Extension:     extension,
+			Extension:     cleanExt,
 			Year:          year,
 			Publisher:     publisher,
 			Language:      language,
@@ -113,33 +120,54 @@ var downloadAllCmd = &cobra.Command{
 			fmt.Printf("error completing search query: %v\n", err)
 			os.Exit(1)
 		}
+		if len(books) == 0 {
+			fmt.Printf("No books found for %q\n", searchQuery)
+			os.Exit(0)
+		}
 
+		// Limit concurrent downloads to 2 to prevent network and terminal contention
+		sem := make(chan struct{}, 2)
 		var wg sync.WaitGroup
-		bChan := make(chan *libgen.Book, results)
+		var failedCount int
+		var mu sync.Mutex
+
 		for _, book := range books {
 			if err := libgen.GetDownloadURL(book, useIpfs, pinnedMirror); err != nil {
-				fmt.Printf("error getting download DownloadURL: %v\n", err)
+				fmt.Printf("error getting download URL for %q: %v\n", book.Title, err)
+				mu.Lock()
+				failedCount++
+				mu.Unlock()
 				continue
 			}
-			wg.Add(1)
-			bChan <- book
-			go func() {
-				curBook := <-bChan
-				if useIpfs {
-					if err := libgen.DownloadBookIPFS(curBook, output); err != nil {
-						fmt.Printf("error downloading %v: %v\n", curBook.Title, err)
-					}
-				} else {
-					if err := libgen.DownloadBook(curBook, output); err != nil {
-						fmt.Printf("error downloading %v: %v\n", curBook, err)
-					}
-				}
 
-				wg.Done()
-			}()
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(curBook *libgen.Book) {
+				defer func() {
+					<-sem
+					wg.Done()
+				}()
+
+				var dlErr error
+				if useIpfs {
+					dlErr = libgen.DownloadBookIPFS(curBook, output)
+				} else {
+					dlErr = libgen.DownloadBook(curBook, output)
+				}
+				if dlErr != nil {
+					fmt.Printf("error downloading %q: %v\n", curBook.Title, dlErr)
+					mu.Lock()
+					failedCount++
+					mu.Unlock()
+				}
+			}(book)
 		}
 		wg.Wait()
-		close(bChan)
+
+		if failedCount > 0 {
+			fmt.Printf("%s Completed with %d failure(s) out of %d books.\n", color.YellowString("[WARN]"), failedCount, len(books))
+			os.Exit(1)
+		}
 
 		if runtime.GOOS == "windows" {
 			_, err = fmt.Fprintf(color.Output, "%s\n", color.GreenString("[DONE]"))

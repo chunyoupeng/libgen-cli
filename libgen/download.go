@@ -1,5 +1,6 @@
 // Copyright © 2019 Antoine Chiny <antoine.chiny@inria.fr>
 // Copyright © 2019 Ryan Ciehanski <ryan@ciehanski.com>
+// Copyright © 2026 Chunyou Peng <chunyoupeng@gmail.com>
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,212 +17,356 @@
 package libgen
 
 import (
-	"crypto/tls"
+	"context"
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/cheggaaa/pb/v3"
 )
 
-// DownloadBook grabs the download DownloadURL for the book requested.
-// First, it queries Booksdl.org and then b-ok.cc for valid DownloadURL.
-// Then, the download process is initiated with a progress bar displayed to
-// the user's CLI.
+// DownloadBook downloads the resource identified by book.DownloadURL to outputPath.
+// It streams into a temporary file in the destination directory, validates content,
+// and atomically renames to the final filename upon completion.
 func DownloadBook(book *Book, outputPath string) error {
-	var filesize int64
+	if book == nil || book.DownloadURL == "" {
+		return errors.New("no download URL available for book")
+	}
+
 	filename := getBookFilename(book)
-
-	req, err := http.NewRequest("GET", book.DownloadURL, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Add("Accept-Encoding", "*")
-	client := http.Client{
-		Transport: &http.Transport{
-			Proxy:           http.ProxyFromEnvironment,
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}}
-	r, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-
-	if r.StatusCode == http.StatusOK {
-		filesize = r.ContentLength
-		bar := pb.Full.Start64(filesize)
-
-		out, err := makeFile(outputPath, filename)
+	targetDir := outputPath
+	if targetDir == "" {
+		wd, err := os.Getwd()
 		if err != nil {
 			return err
 		}
-		_, err = io.Copy(out, bar.NewProxyReader(r.Body))
-		if err != nil {
-			return err
-		}
+		targetDir = filepath.Join(wd, "libgen")
+	}
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return err
+	}
 
+	finalPath := filepath.Join(targetDir, filename)
+	tempPath := finalPath + ".tmp"
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, book.DownloadURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", DefaultUserAgent)
+	req.Header.Set("Accept", "*/*")
+	if book.PageURL != "" {
+		req.Header.Set("Referer", book.PageURL)
+	} else if u, err := url.Parse(book.DownloadURL); err == nil && u.Scheme != "" && u.Host != "" {
+		req.Header.Set("Referer", fmt.Sprintf("%s://%s/index.php", u.Scheme, u.Host))
+	}
+
+	resp, err := downloadHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unable to reach mirror %v: HTTP %v", req.Host, resp.StatusCode)
+	}
+
+	ct := resp.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, "text/html") && resp.ContentLength < 10000 {
+		return fmt.Errorf("mirror returned HTML error page instead of media")
+	}
+
+	f, err := os.Create(tempPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = f.Close()
+		if _, statErr := os.Stat(tempPath); statErr == nil {
+			_ = os.Remove(tempPath)
+		}
+	}()
+
+	var reader io.Reader = resp.Body
+	var bar *pb.ProgressBar
+	if resp.ContentLength > 0 {
+		bar = pb.Full.Start64(resp.ContentLength)
+		reader = bar.NewProxyReader(resp.Body)
+	}
+
+	written, err := io.Copy(f, reader)
+	if bar != nil {
 		bar.Finish()
-
-		if err := out.Close(); err != nil {
-			return err
-		}
-		if err := r.Body.Close(); err != nil {
-			return err
-		}
-	} else {
-		return fmt.Errorf("unable to reach mirror %v: HTTP %v", req.Host, r.StatusCode)
+	}
+	if err != nil {
+		return err
+	}
+	if resp.ContentLength > 0 && written < resp.ContentLength {
+		return fmt.Errorf("truncated download: expected %d bytes, got %d", resp.ContentLength, written)
 	}
 
-	return nil
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	return os.Rename(tempPath, finalPath)
 }
 
-// GetDownloadURL picks a download mirror to download the specified
-// resource from. First tries the search mirror's ads.php page, then
-// falls back to legacy download mirrors.
-// GetDownloadURL resolves book.DownloadURL. If searchMirror is non-nil it is
-// used as the search mirror for the primary ads.php lookup; otherwise a random
-// working search mirror is chosen. The library.lol/libgen.pm fallback is always
-// automatic.
+// GetDownloadURL resolves book.DownloadURL using a multi-tiered fallback.
+// In normal mode:
+//   Tier 1: search mirror's ads.php page (with same-origin Referer)
+//   Tier 2: alternative search mirrors if primary fails
+//   Tier 3: search mirror's file.php page if book.ID is available
+//   Tier 4: library.lol / libgen.pm download mirrors
+// In useIpfs mode:
+//   Resolves IPFS gateway links via file.php or library.lol
 func GetDownloadURL(book *Book, useIpfs bool, searchMirror *url.URL) error {
-	// Try getting download URL from search mirror's ads.php page first
+	if book == nil {
+		return errors.New("book is nil")
+	}
+
+	if useIpfs {
+		// IPFS mode: extract IPFS gateway link from file.php or library.lol
+		if book.ID != "" {
+			if err := getIPFSFromFilePage(book, searchMirror); err == nil && book.DownloadURL != "" {
+				return nil
+			}
+		}
+		if err := getLibraryLolURL(book, true); err == nil && book.DownloadURL != "" {
+			return nil
+		}
+		return fmt.Errorf("unable to retrieve IPFS download link for book: %s", book.Title)
+	}
+
+	// Tier 1: Search mirror ads.php
 	if err := getSearchMirrorURL(book, searchMirror); err == nil && book.DownloadURL != "" {
 		return nil
 	}
 
-	// Fallback to legacy download mirrors
-	chosenMirror := DownloadMirrors[rand.Intn(len(DownloadMirrors))]
+	// Tier 2: Try other search mirrors if unpinned
+	if searchMirror == nil {
+		working := GetWorkingMirror(SearchMirrors)
+		if working.Host != "" {
+			if err := getSearchMirrorURL(book, &working); err == nil && book.DownloadURL != "" {
+				return nil
+			}
+		}
+	}
 
-	var x int
-	tries := 3
-	for tries >= x {
-		switch chosenMirror.Hostname() {
+	// Tier 3: Search mirror file.php
+	if book.ID != "" {
+		if err := getDirectLinkFromFilePage(book, searchMirror); err == nil && book.DownloadURL != "" {
+			return nil
+		}
+	}
+
+	// Tier 4: Fallback to download mirrors (library.lol / libgen.pm)
+	for _, dm := range DownloadMirrors {
+		switch dm.Hostname() {
 		case "library.lol":
-			if useIpfs {
-				if err := getLibraryLolURL(book, true); err != nil {
-					return err
-				}
-			} else {
-				if err := getLibraryLolURL(book, false); err != nil {
-					if err := getLibgenPMURL(book); err != nil {
-						return err
-					}
-				}
+			if err := getLibraryLolURL(book, false); err == nil && book.DownloadURL != "" {
+				return nil
 			}
 		case "libgen.pm":
-			if !useIpfs {
-				if err := getLibgenPMURL(book); err != nil {
-					if err := getLibraryLolURL(book, false); err != nil {
-						return err
-					}
-				}
-			} else {
-				// No IPFS URLs on libgen.pm pages, fallback to library.lol
-				if err := getLibraryLolURL(book, true); err != nil {
-					return err
-				}
+			if err := getLibgenPMURL(book); err == nil && book.DownloadURL != "" {
+				return nil
 			}
 		}
-		if book.DownloadURL != "" {
-			break
-		}
-		// Increment tries
-		x++
 	}
 
-	if book.DownloadURL == "" {
-		return fmt.Errorf("unable to retrieve download link for desired resource")
-	}
-	return nil
+	return fmt.Errorf("unable to retrieve download link for desired resource: %s", book.Title)
 }
 
-// getSearchMirrorURL extracts the download URL from the search mirror's
-// ads.php page, which contains a direct get.php download link.
+// getSearchMirrorURL extracts the get.php download URL from the search mirror's ads.php page.
 func getSearchMirrorURL(book *Book, pinned *url.URL) error {
 	var mirror url.URL
-	if pinned != nil {
+	if pinned != nil && pinned.Host != "" {
 		mirror = *pinned
 	} else {
-		mirror = GetWorkingMirror(SearchMirrors)
+		working := GetWorkingMirror(SearchMirrors)
+		if working.Host == "" {
+			return errors.New("no working search mirror available")
+		}
+		mirror = working
 	}
-	mirror.Path = "ads.php"
-	q := mirror.Query()
+
+	q := url.Values{}
 	q.Set("md5", book.Md5)
-	mirror.RawQuery = q.Encode()
+	adsURL := endpoint(mirror, "ads.php", q)
+	referer := endpoint(mirror, "index.php", nil)
 
-	book.PageURL = mirror.String()
+	book.PageURL = adsURL.String()
 
-	b, err := getBody(mirror.String())
+	b, err := getBodyWithReferer(context.Background(), adsURL.String(), referer.String())
 	if err != nil {
 		return err
 	}
 
-	// Match the get.php download link
 	re := regexp.MustCompile(`get\.php\?md5=\w{32}&key=\w{16}`)
 	match := re.FindString(string(b))
 	if match == "" {
 		return errors.New("no valid download URL found on ads.php page")
 	}
 
-	mirror.Path = match
-	mirror.RawQuery = ""
-	book.DownloadURL = mirror.Scheme + "://" + mirror.Host + "/" + match
-
+	book.DownloadURL = fmt.Sprintf("%s://%s/%s", mirror.Scheme, mirror.Host, match)
 	return nil
 }
 
-// DownloadDbdump downloads the selected database dump from
-// Library Genesis.
+// getIPFSFromFilePage extracts IPFS gateway links from the file.php page.
+func getIPFSFromFilePage(book *Book, pinned *url.URL) error {
+	var mirror url.URL
+	if pinned != nil && pinned.Host != "" {
+		mirror = *pinned
+	} else {
+		mirror = GetWorkingMirror(SearchMirrors)
+	}
+	if mirror.Host == "" {
+		return errors.New("no working search mirror available")
+	}
+
+	q := url.Values{}
+	q.Set("id", book.ID)
+	fileURL := endpoint(mirror, "file.php", q)
+	referer := endpoint(mirror, "index.php", nil)
+
+	b, err := getBodyWithReferer(context.Background(), fileURL.String(), referer.String())
+	if err != nil {
+		return err
+	}
+
+	re := regexp.MustCompile(`https?://[^"]*ipfs[^"]*`)
+	matches := re.FindAllString(string(b), -1)
+	for _, m := range matches {
+		if strings.Contains(m, "/ipfs/") {
+			book.DownloadURL = m
+			book.PageURL = fileURL.String()
+			return nil
+		}
+	}
+
+	return errors.New("no IPFS link found on file.php")
+}
+
+// getDirectLinkFromFilePage checks file.php for direct download or mirror links.
+func getDirectLinkFromFilePage(book *Book, pinned *url.URL) error {
+	var mirror url.URL
+	if pinned != nil && pinned.Host != "" {
+		mirror = *pinned
+	} else {
+		mirror = GetWorkingMirror(SearchMirrors)
+	}
+	if mirror.Host == "" {
+		return errors.New("no working search mirror available")
+	}
+
+	q := url.Values{}
+	q.Set("id", book.ID)
+	fileURL := endpoint(mirror, "file.php", q)
+	referer := endpoint(mirror, "index.php", nil)
+
+	b, err := getBodyWithReferer(context.Background(), fileURL.String(), referer.String())
+	if err != nil {
+		return err
+	}
+
+	// Try IPFS gateway link as direct HTTP fallback
+	re := regexp.MustCompile(`https?://(cloudflare-ipfs\.com|gateway\.ipfs\.io)/ipfs/[^"]+`)
+	match := re.FindString(string(b))
+	if match != "" {
+		book.DownloadURL = match
+		book.PageURL = fileURL.String()
+		return nil
+	}
+
+	return errors.New("no alternative download link found on file.php")
+}
+
+// DownloadDbdump downloads the selected database dump from Library Genesis.
 func DownloadDbdump(filename string, outputPath string) error {
 	mirror, err := FindWorkingMirror(DbdumpsMirrors)
 	if err != nil {
 		return err
 	}
-	client := http.Client{
-		Transport: &http.Transport{
-			Proxy:           http.ProxyFromEnvironment,
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}}
-	r, err := client.Get(fmt.Sprintf("%s/%s", mirror.String(), filename))
+
+	targetDir := outputPath
+	if targetDir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		targetDir = filepath.Join(wd, "libgen")
+	}
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return err
+	}
+
+	finalPath := filepath.Join(targetDir, filename)
+	tempPath := finalPath + ".tmp"
+
+	downloadURL := fmt.Sprintf("%s/%s", strings.TrimSuffix(mirror.String(), "/"), filename)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", DefaultUserAgent)
+
+	resp, err := downloadHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unable to reach mirror: HTTP %v", resp.StatusCode)
+	}
+
+	f, err := os.Create(tempPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = f.Close()
+		if _, statErr := os.Stat(tempPath); statErr == nil {
+			_ = os.Remove(tempPath)
+		}
+	}()
+
+	var reader io.Reader = resp.Body
+	var bar *pb.ProgressBar
+	if resp.ContentLength > 0 {
+		bar = pb.Full.Start64(resp.ContentLength)
+		reader = bar.NewProxyReader(resp.Body)
+	}
+
+	_, err = io.Copy(f, reader)
+	if bar != nil {
+		bar.Finish()
+	}
 	if err != nil {
 		return err
 	}
 
-	if r.StatusCode == http.StatusOK {
-		filesize := r.ContentLength
-		bar := pb.Full.Start64(filesize)
-
-		out, err := makeFile(outputPath, filename)
-		if err != nil {
-			return err
-		}
-		_, err = io.Copy(out, bar.NewProxyReader(r.Body))
-		if err != nil {
-			return err
-		}
-
-		bar.Finish()
-
-		if err := out.Close(); err != nil {
-			return err
-		}
-		if err := r.Body.Close(); err != nil {
-			return err
-		}
-	} else {
-		return fmt.Errorf("unable to reach mirror: HTTP %v", r.StatusCode)
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
 	}
 
-	return nil
+	return os.Rename(tempPath, finalPath)
 }
 
 func getLibraryLolURL(book *Book, useIpfs bool) error {
-	queryURL := DownloadMirrors[0].String() + book.Md5
+	queryURL := strings.TrimSuffix(DownloadMirrors[0].String(), "/") + "/" + book.Md5
 	book.PageURL = queryURL
 
 	b, err := getBody(queryURL)
@@ -229,31 +374,26 @@ func getLibraryLolURL(book *Book, useIpfs bool) error {
 		return err
 	}
 
-	downloadURL := []byte{}
+	var downloadURL []byte
 	if useIpfs {
-		// Attempt to find IPFS download URL via gateway.ipfs.io
 		downloadURL = findMatch(libraryLolIPFSReg, b)
 		if downloadURL == nil {
-			// Fallback to cloudflare-ipfs.com
 			downloadURL = findMatch(libraryLolIPFSCFReg, b)
-			if downloadURL == nil {
-				return errors.New("no valid download LibraryLol download URL found")
-			}
 		}
 	} else {
 		downloadURL = findMatch(libraryLolReg, b)
-		if downloadURL == nil {
-			return errors.New("no valid download LibraryLol download URL found")
-		}
+	}
+
+	if downloadURL == nil {
+		return errors.New("no valid LibraryLol download URL found")
 	}
 
 	book.DownloadURL = string(downloadURL)
-
 	return nil
 }
 
 func getLibgenPMURL(book *Book) error {
-	queryURL := DownloadMirrors[1].String() + book.Md5
+	queryURL := strings.TrimSuffix(DownloadMirrors[1].String(), "/") + "/" + book.Md5
 	book.PageURL = queryURL
 
 	b, err := getBody(queryURL)
@@ -266,68 +406,53 @@ func getLibgenPMURL(book *Book) error {
 		return errors.New("no valid LibgenPM download URL found")
 	}
 	book.DownloadURL = fmt.Sprintf("https://libgen.rocks/%s", string(downloadURL))
-
 	return nil
 }
 
-func makeFile(outputPath, filename string) (*os.File, error) {
-	var out *os.File
-	var mkErr error
-
-	// Handle long titles
-	if len(filename) >= 256 {
-		filename = filename[:256]
-	}
-
-	// if output path was not provided
-	if outputPath == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return nil, err
-		}
-		if stat, err := os.Stat(fmt.Sprintf("%s/libgen", wd)); err == nil && stat.IsDir() {
-			out, mkErr = os.Create(fmt.Sprintf("%s/libgen/%s", wd, filename))
-		} else {
-			if err := os.Mkdir(fmt.Sprintf("%s/libgen", wd), 0755); err != nil {
-				return nil, err
-			}
-			out, mkErr = os.Create(fmt.Sprintf("%s/libgen/%s", wd, filename))
-		}
-		if mkErr != nil {
-			return nil, mkErr
-		}
-	} else {
-		// If output path was provided
-		if stat, err := os.Stat(outputPath); err == nil && stat.IsDir() {
-			out, err = os.Create(fmt.Sprintf("%s/%s", outputPath, filename))
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			return nil, errors.New("invalid output path")
-		}
-	}
-
-	return out, nil
-}
-
-// findMatch is a helper function that searches an []byte
-// for a specified regex and returns the matches.
 func findMatch(reg string, response []byte) []byte {
 	re := regexp.MustCompile(reg)
 	match := re.FindString(string(response))
-
 	if match != "" {
 		return []byte(match)
 	}
-
 	return nil
 }
 
+func sanitizeFilename(name string) string {
+	illegal := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|", "\n", "\r", "\t"}
+	clean := name
+	for _, char := range illegal {
+		clean = strings.ReplaceAll(clean, char, "_")
+	}
+	return strings.TrimSpace(clean)
+}
+
 func getBookFilename(book *Book) string {
-	var tmp []string
-	tmp = append(tmp, book.Title)
-	tmp = append(tmp, fmt.Sprintf(" by %s", book.Author))
-	tmp = append(tmp, fmt.Sprintf(".%s", book.Extension))
-	return strings.Join(tmp, "")
+	title := sanitizeFilename(book.Title)
+	if title == "" {
+		title = book.Md5
+	}
+	author := sanitizeFilename(book.Author)
+	ext := sanitizeFilename(book.Extension)
+	if ext == "" {
+		ext = "pdf"
+	}
+	ext = strings.TrimPrefix(ext, ".")
+
+	var filename string
+	if author != "" && author != "N_A" && author != "N/A" {
+		filename = fmt.Sprintf("%s by %s.%s", title, author, ext)
+	} else {
+		filename = fmt.Sprintf("%s.%s", title, ext)
+	}
+
+	// Preserve extension when truncating
+	if len(filename) > 200 {
+		suffix := fmt.Sprintf(".%s", ext)
+		maxTitleLen := 200 - len(suffix)
+		if maxTitleLen > 0 && len(filename) > maxTitleLen {
+			filename = filename[:maxTitleLen] + suffix
+		}
+	}
+	return filename
 }

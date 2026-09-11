@@ -1,4 +1,5 @@
 // Copyright © 2019 Ryan Ciehanski <ryan@ciehanski.com>
+// Copyright © 2026 Chunyou Peng <chunyoupeng@gmail.com>
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,24 +32,25 @@ import (
 var downloadCmd = &cobra.Command{
 	Use:     "download",
 	Short:   "Download a specific resource by hash.",
-	Long:    `Use this command if you already know the hash of the specific resource you'd like to download.'`,
+	Long:    `Use this command if you already know the hash of the specific resource you'd like to download.`,
 	Example: "libgen download 2F2DBA2A621B693BB95601C16ED680F8",
 	Run: func(cmd *cobra.Command, args []string) {
-
 		if len(args) < 1 {
 			if err := cmd.Help(); err != nil {
 				fmt.Printf("error displaying CLI help: %v\n", err)
 			}
 			os.Exit(1)
 		}
-		// Ensure provided entry is valid MD5 hash
-		re := regexp.MustCompile(libgen.SearchMD5)
-		if !re.MatchString(args[0]) {
-			fmt.Printf("Please provide a valid MD5 hash\n")
-			os.Exit(1)
+
+		// Ensure all provided entries are valid 32-hex MD5 hashes
+		md5Regex := regexp.MustCompile(`^[a-fA-F0-9]{32}$`)
+		for _, a := range args {
+			if !md5Regex.MatchString(a) {
+				fmt.Printf("Please provide a valid 32-character MD5 hash: %s\n", a)
+				os.Exit(1)
+			}
 		}
 
-		// Get flags
 		output, err := cmd.Flags().GetString("output")
 		if err != nil {
 			fmt.Printf("error getting output flag: %v\n", err)
@@ -73,35 +75,44 @@ var downloadCmd = &cobra.Command{
 			fmt.Printf("error selecting search mirror: %v\n", err)
 			os.Exit(1)
 		}
+
 		bookDetails, err := libgen.GetDetails(&libgen.GetDetailsOptions{
 			Hashes:       args,
 			SearchMirror: searchMirror,
 			Print:        true,
 		})
 		if err != nil {
-			// If error and no mirror was pinned, try another mirror before exiting
 			if pinnedMirror != nil {
 				log.Fatalf("error retrieving results from LibGen API: %v", err)
 			}
-			secondaryMirror := libgen.GetWorkingMirror(libgen.SearchMirrors)
-			for secondaryMirror == searchMirror {
-				secondaryMirror = libgen.GetWorkingMirror(libgen.SearchMirrors)
+			// Try finite alternative search mirrors without looping infinitely
+			for _, m := range libgen.SearchMirrors {
+				if m.Host == searchMirror.Host {
+					continue
+				}
+				bookDetails, err = libgen.GetDetails(&libgen.GetDetailsOptions{
+					Hashes:       args,
+					SearchMirror: m,
+					Print:        true,
+				})
+				if err == nil && len(bookDetails) > 0 {
+					break
+				}
 			}
-			bookDetails, err = libgen.GetDetails(&libgen.GetDetailsOptions{
-				Hashes:       args,
-				SearchMirror: secondaryMirror,
-				Print:        true,
-			})
 			if err != nil {
 				log.Fatalf("error retrieving results from LibGen API: %v", err)
 			}
 		}
 
-		for _, book := range bookDetails {
+		if len(bookDetails) == 0 {
+			fmt.Println("No book details found for provided hash(es)")
+			os.Exit(1)
+		}
 
+		for _, book := range bookDetails {
 			fmt.Println(strings.Repeat("-", 80))
 			fmt.Printf("Download started for: %s by %s\n", book.Title, book.Author)
-			// 这几个链接唯一的不同就是，正则表达式不同。
+
 			if err := libgen.GetDownloadURL(book, useIpfs, pinnedMirror); err != nil {
 				fmt.Printf("error getting download URL: %v\n", err)
 				os.Exit(1)
@@ -119,7 +130,7 @@ var downloadCmd = &cobra.Command{
 			}
 
 			if runtime.GOOS == "windows" {
-				_, err = fmt.Fprintf(color.Output, "%s %s by %s.%s", color.GreenString("[OK]"),
+				_, err = fmt.Fprintf(color.Output, "%s %s by %s.%s\n", color.GreenString("[OK]"),
 					book.Title, book.Author, book.Extension)
 				if err != nil {
 					fmt.Printf("error writing to Windows os.Stdout: %v\n", err)
@@ -129,9 +140,7 @@ var downloadCmd = &cobra.Command{
 				fmt.Printf("%s %s by %s.%s\n", color.GreenString("[OK]"),
 					book.Title, book.Author, book.Extension)
 			}
-
 		}
-
 	},
 }
 

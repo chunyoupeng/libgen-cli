@@ -1,5 +1,6 @@
 // Copyright © 2019 Antoine Chiny <antoine.chiny@inria.fr>
 // Copyright © 2019 Ryan Ciehanski <ryan@ciehanski.com>
+// Copyright © 2026 Chunyou Peng <chunyoupeng@gmail.com>
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,12 +16,10 @@
 package libgen
 
 import (
-	"crypto/tls"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -28,6 +27,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/fatih/color"
@@ -81,12 +82,24 @@ type GetDetailsOptions struct {
 	SortBy        string
 }
 
-// Search sends a query to the index.php page hosted by gen.lib.rus.ec(or any
-// similar mirror) and then provides the web page's contents provided from the
-// resulting http request to the parseHashes() function to extract the specific
-// hashes of matches found from the search query provided.
+type fileRecord struct {
+	book      *Book
+	editionID string
+}
+
+type editionInfo struct {
+	title     string
+	author    string
+	year      string
+	language  string
+	publisher string
+	edition   string
+	coverURL  string
+}
+
+// Search sends a query to the index.php page hosted by Library Genesis
+// and extracts matching MD5 hashes, then fetches detailed metadata.
 func Search(options *SearchOptions) ([]*Book, error) {
-	// libgen search only allows query Results of 25, 50 or 100.
 	var res int
 	switch {
 	case options.Results <= 25:
@@ -97,8 +110,7 @@ func Search(options *SearchOptions) ([]*Book, error) {
 		res = 100
 	}
 
-	// Define DownloadURL with required query parameters
-	q := options.SearchMirror.Query()
+	q := url.Values{}
 	q.Set("req", options.Query)
 	q.Set("lg_topic", "libgen")
 	q.Set("open", "0")
@@ -106,7 +118,7 @@ func Search(options *SearchOptions) ([]*Book, error) {
 	q.Set("res", fmt.Sprint(res))
 	q.Set("phrase", "1")
 	q.Set("column", "def")
-	// Handle sorting options
+
 	switch options.SortBy {
 	case "id":
 		q.Set("sort", "id")
@@ -133,14 +145,13 @@ func Search(options *SearchOptions) ([]*Book, error) {
 		q.Set("sort", "language")
 		setSortASC(q, options.SortASC)
 	}
-	options.SearchMirror.RawQuery = q.Encode()
-	// fmt.Println("options.SearchMirror.String() = ", options.SearchMirror.String())
-	b, err := getBody(options.SearchMirror.String())
+
+	searchURL := endpoint(options.SearchMirror, "index.php", q)
+	b, err := getBody(searchURL.String())
 	if err != nil {
 		return nil, err
 	}
 
-	// Get hashes from raw webpage and store them in hashes
 	hashes := parseHashes(b, options.Results)
 
 	books, err := GetDetails(&GetDetailsOptions{
@@ -161,77 +172,153 @@ func Search(options *SearchOptions) ([]*Book, error) {
 	return books, nil
 }
 
-// GetDetails retrieves more details about a specific piece of media
-// based off of its unique hash/id. That information is then requested
-// in JSON format and sanitized in an array of Books.
+// GetDetails retrieves book details in two phases:
+// Phase 1: bounded concurrent lookup of file records (object=f)
+// Phase 2: batched lookup of edition records (object=e)
+// It then maps metadata, applies filters, and optionally prints details.
 func GetDetails(options *GetDetailsOptions) ([]*Book, error) {
-	var books []*Book
+	if len(options.Hashes) == 0 {
+		return nil, nil
+	}
 
-	// For each hash found on the page, parse it into a Book struct
-	for _, hash := range options.Hashes {
-		// Step 1: Get file info (filesize, extension, pages, md5, edition ID)
-		options.SearchMirror.Path = "json.php"
-		q := options.SearchMirror.Query()
-		q.Set("object", "f")
-		q.Set("md5", hash)
-		options.SearchMirror.RawQuery = q.Encode()
-
-		b, err := getBody(options.SearchMirror.String())
-		if err != nil {
-			return nil, err
+	var validHashes []string
+	for _, h := range options.Hashes {
+		clean := strings.TrimSpace(h)
+		if len(clean) == 32 {
+			validHashes = append(validHashes, clean)
 		}
+	}
+	if len(validHashes) == 0 {
+		return nil, nil
+	}
 
-		book, editionID, err := parseFileResponse(b)
-		if err != nil {
+	// Phase 1: Fetch file info concurrently with bounded workers (up to 4)
+	fileRecords := make([]*fileRecord, len(validHashes))
+	workers := 4
+	if len(validHashes) < workers {
+		workers = len(validHashes)
+	}
+
+	type fetchJob struct {
+		index int
+		hash  string
+	}
+	jobs := make(chan fetchJob, len(validHashes))
+	var wg sync.WaitGroup
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				q := url.Values{}
+				q.Set("object", "f")
+				q.Set("md5", job.hash)
+				reqURL := endpoint(options.SearchMirror, "json.php", q)
+
+				b, err := getBody(reqURL.String())
+				if err != nil {
+					continue
+				}
+				book, editionID, err := parseFileResponse(b)
+				if err == nil && book != nil {
+					fileRecords[job.index] = &fileRecord{
+						book:      book,
+						editionID: editionID,
+					}
+				}
+			}
+		}()
+	}
+
+	for i, h := range validHashes {
+		jobs <- fetchJob{index: i, hash: h}
+	}
+	close(jobs)
+	wg.Wait()
+
+	// Phase 2: Collect unique edition IDs and batch-query edition metadata
+	editionMap := make(map[string]editionInfo)
+	var uniqueEditionIDs []string
+	seenEditionIDs := make(map[string]bool)
+	for _, rec := range fileRecords {
+		if rec != nil && rec.editionID != "" && !seenEditionIDs[rec.editionID] {
+			seenEditionIDs[rec.editionID] = true
+			uniqueEditionIDs = append(uniqueEditionIDs, rec.editionID)
+		}
+	}
+
+	batchSize := 30
+	for i := 0; i < len(uniqueEditionIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(uniqueEditionIDs) {
+			end = len(uniqueEditionIDs)
+		}
+		chunk := uniqueEditionIDs[i:end]
+		q := url.Values{}
+		q.Set("object", "e")
+		q.Set("ids", strings.Join(chunk, ","))
+		reqURL := endpoint(options.SearchMirror, "json.php", q)
+
+		eb, err := getBody(reqURL.String())
+		if err == nil {
+			parsed := parseEditionBatchResponse(eb)
+			for eid, info := range parsed {
+				editionMap[eid] = info
+			}
+		}
+	}
+
+	// Phase 3: Combine metadata, apply filters, preserving input order
+	var validExts []string
+	for _, ext := range options.Extension {
+		trimmed := strings.ToLower(strings.TrimSpace(ext))
+		if trimmed != "" {
+			validExts = append(validExts, trimmed)
+		}
+	}
+
+	var books []*Book
+	for _, rec := range fileRecords {
+		if rec == nil || rec.book == nil {
 			continue
 		}
-
-		// Step 2: Get edition info (title, author, year, publisher, language)
-		if editionID != "" {
-			options.SearchMirror.Path = "json.php"
-			q = options.SearchMirror.Query()
-			q.Set("object", "e")
-			q.Set("ids", editionID)
-			options.SearchMirror.RawQuery = q.Encode()
-
-			eb, err := getBody(options.SearchMirror.String())
-			if err == nil {
-				parseEditionResponse(eb, book)
-			}
+		book := rec.book
+		if info, ok := editionMap[rec.editionID]; ok {
+			book.Title = info.title
+			book.Author = info.author
+			book.Year = info.year
+			book.Language = info.language
+			book.Publisher = info.publisher
+			book.Edition = info.edition
+			book.CoverURL = info.coverURL
 		}
 
 		// Flag filters
 		if options.RequireAuthor && book.Author == "" {
 			continue
 		}
-		if len(options.Extension) > 0 {
-			validExtension := false
-			// 也就是说可以选择多个后缀，只要满足一个就可以
-			for _, ext := range options.Extension {
-				if ext == book.Extension {
-					validExtension = true
+		if len(validExts) > 0 {
+			matched := false
+			bookExt := strings.ToLower(strings.TrimSpace(book.Extension))
+			for _, ext := range validExts {
+				if ext == bookExt {
+					matched = true
+					break
 				}
 			}
-			if !validExtension {
+			if !matched {
 				continue
 			}
 		}
 		if options.Year != 0 {
 			y, err := strconv.Atoi(book.Year)
-			if err != nil {
-				return nil, err
-			}
-			if options.Year != y {
+			if err != nil || options.Year != y {
 				continue
 			}
 		}
-		// Many books don't have the year field set, so
-		// if we are sorting by year, we need to skip any books
-		// with a blank year field.
-		if options.SortBy == "year" {
-			if book.Year == "" || book.Year == "0" {
-				continue
-			}
+		if options.SortBy == "year" && (book.Year == "" || book.Year == "0") {
+			continue
 		}
 		if options.Publisher != "" {
 			if !strings.Contains(strings.ToLower(book.Publisher), strings.ToLower(options.Publisher)) {
@@ -243,48 +330,46 @@ func GetDetails(options *GetDetailsOptions) ([]*Book, error) {
 				continue
 			}
 		}
+
 		if options.Print {
 			if err := printDetails(book); err != nil {
 				return nil, err
 			}
 		}
 
-		// Add valid book to the []Book for the search
 		books = append(books, book)
 	}
 
 	return books, nil
 }
 
-// CheckMirror returns the HTTP status code of the DownloadURL provided.
-func CheckMirror(url url.URL) int {
-	status, err := probeMirror(url)
+// CheckMirror returns the HTTP status code of the provided URL.
+func CheckMirror(targetURL url.URL) int {
+	status, err := probeMirror(targetURL)
 	if err != nil {
 		return http.StatusBadGateway
 	}
 	return status
 }
 
-func probeMirror(url url.URL) (int, error) {
-	client := http.Client{
-		Timeout: HTTPClientTimeout,
-		Transport: &http.Transport{
-			Proxy:           http.ProxyFromEnvironment,
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}}
-	r, err := client.Get(url.String())
+func probeMirror(targetURL url.URL) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL.String(), nil)
 	if err != nil {
 		return http.StatusBadGateway, err
 	}
-	if r.StatusCode != http.StatusOK {
-		return r.StatusCode, nil
+	req.Header.Set("User-Agent", DefaultUserAgent)
+	resp, err := defaultHTTPClient.Do(req)
+	if err != nil {
+		return http.StatusBadGateway, err
 	}
-	return http.StatusOK, nil
+	defer resp.Body.Close()
+	return resp.StatusCode, nil
 }
 
-// GetWorkingMirror selects a random mirror from the []url.DownloadURL
-// provided and checks the mirror for a proper HTTP status code
-// for working order.
+// GetWorkingMirror selects a working mirror or returns an empty url.URL.
 func GetWorkingMirror(urls []url.URL) url.URL {
 	mirror, err := FindWorkingMirror(urls)
 	if err != nil {
@@ -293,103 +378,94 @@ func GetWorkingMirror(urls []url.URL) url.URL {
 	return mirror
 }
 
-// FindWorkingMirror checks each mirror at most once in random order and
-// returns the first mirror that responds with HTTP 200.
+// FindWorkingMirror probes candidate mirrors concurrently with a bounded timeout
+// and returns the first mirror that responds with HTTP 200.
 func FindWorkingMirror(urls []url.URL) (url.URL, error) {
-	var mirror url.URL
 	if len(urls) == 0 {
-		return mirror, errors.New("no mirrors configured")
+		return url.URL{}, errors.New("no mirrors configured")
+	}
+
+	type probeResult struct {
+		mirror url.URL
+		status int
+		err    error
+	}
+
+	perm := rand.Perm(len(urls))
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	resultChan := make(chan probeResult, len(urls))
+	for _, idx := range perm {
+		u := urls[idx]
+		go func(target url.URL) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+			if err != nil {
+				resultChan <- probeResult{mirror: target, status: http.StatusBadGateway, err: err}
+				return
+			}
+			req.Header.Set("User-Agent", DefaultUserAgent)
+			resp, err := defaultHTTPClient.Do(req)
+			if err != nil {
+				resultChan <- probeResult{mirror: target, status: http.StatusBadGateway, err: err}
+				return
+			}
+			_ = resp.Body.Close()
+			resultChan <- probeResult{mirror: target, status: resp.StatusCode, err: nil}
+		}(u)
 	}
 
 	var failures []string
-	for _, i := range rand.Perm(len(urls)) {
-		randMirror := urls[i]
-		status, err := probeMirror(randMirror)
-		if err == nil && status == http.StatusOK {
-			return randMirror, nil
+	for i := 0; i < len(urls); i++ {
+		res := <-resultChan
+		if res.err == nil && res.status == http.StatusOK {
+			cancel()
+			return res.mirror, nil
 		}
-
-		reason := fmt.Sprintf("HTTP %d", status)
-		if err != nil {
-			reason = err.Error()
+		reason := fmt.Sprintf("HTTP %d", res.status)
+		if res.err != nil {
+			reason = res.err.Error()
 		}
-		failures = append(failures, fmt.Sprintf("%s: %s", randMirror.String(), reason))
+		failures = append(failures, fmt.Sprintf("%s: %s", res.mirror.String(), reason))
 	}
 
-	return mirror, fmt.Errorf("no working mirrors found (%d checked): %s", len(urls), strings.Join(failures, "; "))
+	return url.URL{}, fmt.Errorf("no working mirrors found (%d checked): %s", len(urls), strings.Join(failures, "; "))
 }
 
-// ParseDbdumps takes in a HTTP response and scans it for
-// any string that matches a filepath and returns all results.
+// ParseDbdumps scans HTTP response bytes for dbdump file paths.
 func ParseDbdumps(response []byte) []string {
 	re := regexp.MustCompile(dbdumpReg)
 	dbdumps := re.FindAllString(string(response), -1)
-
 	for i, dbdump := range dbdumps {
 		dbdumps[i] = RemoveQuotes(dbdump)
 	}
-
 	return dbdumps
 }
 
-func getBody(baseURL string) ([]byte, error) {
-	client := http.Client{
-		Timeout: HTTPClientTimeout,
-		Transport: &http.Transport{
-			Proxy:           http.ProxyFromEnvironment,
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}}
-	r, err := client.Get(baseURL)
-	if err != nil {
-		log.Printf("http.Get(%q) error: %v", baseURL, err)
-		return nil, err
-	}
-	if r.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unable to reach to mirror %v: %v", baseURL, r.StatusCode)
-	}
-
-	b, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := r.Body.Close(); err != nil {
-		return nil, err
-	}
-
-	return b, nil
-}
-
-// parseHashes takes in a HTTP response and scans it for
-// an MD5 hash and then returns the found hashes.
+// parseHashes extracts MD5 hashes from the search result HTML page.
 func parseHashes(response []byte, results int) []string {
 	var hashes []string
 	re := regexp.MustCompile(SearchHref)
 	matches := re.FindAllString(string(response), -1)
-	// os.WriteFile("response.html", response, 0644)
-	// fmt.Println("matches = ", matches)
+
 	var counter int
+	md5Re := regexp.MustCompile(SearchMD5)
 	for _, m := range matches {
 		if counter >= results {
 			break
 		}
-		re := regexp.MustCompile(SearchMD5)
-		hash := re.FindString(m)
+		hash := md5Re.FindString(m)
 		if len(hash) == 32 {
 			hashes = append(hashes, hash)
 			counter++
 		}
 	}
-
 	return hashes
 }
 
 // parseFileResponse parses the JSON response from object=f API.
-// Returns a Book with file-level fields and the edition ID for further lookup.
 func parseFileResponse(response []byte) (*Book, string, error) {
 	var book Book
-
-	// New format: {"file_id": {"md5": "...", "filesize": "...", "editions": {...}}}
 	var resp map[string]map[string]interface{}
 	if err := json.Unmarshal(response, &resp); err != nil {
 		return nil, "", err
@@ -401,7 +477,7 @@ func parseFileResponse(response []byte) (*Book, string, error) {
 	var editionID string
 	for id, item := range resp {
 		str := func(key string) string {
-			if v, ok := item[key]; ok {
+			if v, ok := item[key]; ok && v != nil {
 				return fmt.Sprint(v)
 			}
 			return ""
@@ -412,7 +488,6 @@ func parseFileResponse(response []byte) (*Book, string, error) {
 		book.Md5 = str("md5")
 		book.Pages = str("pages")
 
-		// Extract edition ID from nested editions object
 		if editions, ok := item["editions"]; ok {
 			if edMap, ok := editions.(map[string]interface{}); ok {
 				for _, ev := range edMap {
@@ -421,38 +496,55 @@ func parseFileResponse(response []byte) (*Book, string, error) {
 							editionID = fmt.Sprint(eid)
 						}
 					}
-					break // take the first edition
+					break
 				}
 			}
 		}
-		break // only take the first file entry
+		break
 	}
 
 	return &book, editionID, nil
 }
 
-// parseEditionResponse parses the JSON response from object=e API
-// and fills in the book metadata fields (title, author, year, etc.).
-func parseEditionResponse(response []byte, book *Book) {
+// parseEditionBatchResponse parses the JSON response from object=e API for multiple IDs.
+func parseEditionBatchResponse(response []byte) map[string]editionInfo {
+	res := make(map[string]editionInfo)
 	var resp map[string]map[string]interface{}
 	if err := json.Unmarshal(response, &resp); err != nil {
-		return
+		return res
 	}
 
-	for _, item := range resp {
+	for id, item := range resp {
 		str := func(key string) string {
-			if v, ok := item[key]; ok {
+			if v, ok := item[key]; ok && v != nil {
 				return fmt.Sprint(v)
 			}
 			return ""
 		}
-		book.Title = str("title")
-		book.Author = str("author")
-		book.Year = str("year")
-		book.Language = str("language")
-		book.Publisher = str("publisher")
-		book.Edition = str("edition")
-		book.CoverURL = str("cover_url")
+		res[id] = editionInfo{
+			title:     str("title"),
+			author:    str("author"),
+			year:      str("year"),
+			language:  str("language"),
+			publisher: str("publisher"),
+			edition:   str("edition"),
+			coverURL:  str("cover_url"),
+		}
+	}
+	return res
+}
+
+// parseEditionResponse fills in book metadata fields from an object=e JSON response.
+func parseEditionResponse(response []byte, book *Book) {
+	parsed := parseEditionBatchResponse(response)
+	for _, info := range parsed {
+		book.Title = info.title
+		book.Author = info.author
+		book.Year = info.year
+		book.Language = info.language
+		book.Publisher = info.publisher
+		book.Edition = info.edition
+		book.CoverURL = info.coverURL
 		break
 	}
 }
@@ -466,10 +558,8 @@ func printDetails(book *Book) error {
 		fsize = humanize.Bytes(uint64(size))
 	}
 
-	// Print separation lines
 	fmt.Println(strings.Repeat("-", 80))
 
-	// Print md5 + Title
 	fTitle := fmt.Sprintf("MD5: %5s %s", color.New(color.FgHiBlue).Sprintf(book.Md5), book.Title)
 	fTitle = formatTitle(fTitle, TitleMaxLength)
 	if runtime.GOOS == "windows" {
@@ -481,7 +571,6 @@ func printDetails(book *Book) error {
 		fmt.Printf("%s\n    ++ ", fTitle)
 	}
 
-	// Slice author name if it exceeds AuthorMaxLength
 	var formatAuthor string
 	if len(book.Author) > AuthorMaxLength {
 		formatAuthor = book.Author[:AuthorMaxLength]
@@ -491,29 +580,22 @@ func printDetails(book *Book) error {
 		formatAuthor = book.Author
 	}
 
-	err = prettify("author", formatAuthor, color.FgYellow, "-25")
-	if err != nil {
+	if err := prettify("author", formatAuthor, color.FgYellow, "-25"); err != nil {
 		return err
 	}
-	err = prettify("year", book.Year, color.FgCyan, "4")
-	if err != nil {
+	if err := prettify("year", book.Year, color.FgCyan, "4"); err != nil {
 		return err
 	}
-	err = prettify("size", fsize, color.FgGreen, "6")
-	if err != nil {
+	if err := prettify("size", fsize, color.FgGreen, "6"); err != nil {
 		return err
 	}
-	err = prettify("type", book.Extension, color.FgRed, "4")
-	if err != nil {
+	if err := prettify("type", book.Extension, color.FgRed, "4"); err != nil {
 		return err
 	}
 	fmt.Println()
-
 	return nil
 }
 
-// formatTitle shortens the title of a Book down to
-// the maximum allowed by TitleMaxLength.
 func formatTitle(title string, maximumLength int) string {
 	var fTitle []string
 	var counter int
@@ -525,19 +607,15 @@ func formatTitle(title string, maximumLength int) string {
 	title = strings.TrimSpace(title)
 	for _, t := range strings.Split(title, " ") {
 		counter += len(t)
-
 		if counter > maximumLength {
 			counter = 0
 			t = t + "...\n"
 		}
 		fTitle = append(fTitle, t)
 	}
-
 	return strings.Join(fTitle, " ")
 }
 
-// prettify is a helper function that adds color and
-// formats text returned to the user.
 func prettify(key string, value string, col color.Attribute, align string) error {
 	c := color.New(col).SprintFunc()
 	a := fmt.Sprintf("%%%ss ", align)
@@ -553,15 +631,11 @@ func prettify(key string, value string, col color.Attribute, align string) error
 	return nil
 }
 
-// RemoveQuotes is a helper function that removes the quotes from
-// dbdumps page results.
 func RemoveQuotes(s string) string {
-	if s == "" {
+	if len(s) < 2 {
 		return ""
 	}
-	s = s[1:]
-	s = s[:len(s)-1]
-	return s
+	return s[1 : len(s)-1]
 }
 
 func setSortASC(q url.Values, sortASC bool) {

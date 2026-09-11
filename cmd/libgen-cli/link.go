@@ -1,4 +1,5 @@
 // Copyright © 2020 Ryan Ciehanski <ryan@ciehanski.com>
+// Copyright © 2026 Chunyou Peng <chunyoupeng@gmail.com>
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,21 +32,20 @@ var linkCmd = &cobra.Command{
 	Long:    `Retrieves and displays the direct download link for a specific resource.`,
 	Example: "libgen link 2F2DBA2A621B693BB95601C16ED680F8",
 	Run: func(cmd *cobra.Command, args []string) {
-
 		if len(args) != 1 {
 			if err := cmd.Help(); err != nil {
 				fmt.Printf("error displaying CLI help: %v\n", err)
 			}
 			os.Exit(1)
 		}
-		// Ensure provided entry is valid MD5 hash
-		re := regexp.MustCompile(libgen.SearchMD5)
-		if !re.MatchString(args[0]) {
-			fmt.Printf("Please provide a valid MD5 hash\n")
+
+		// Ensure provided entry is a valid 32-hex MD5 hash
+		md5Regex := regexp.MustCompile(`^[a-fA-F0-9]{32}$`)
+		if !md5Regex.MatchString(args[0]) {
+			fmt.Printf("Please provide a valid 32-character MD5 hash: %s\n", args[0])
 			os.Exit(1)
 		}
 
-		// Get flags
 		useIpfs, err := cmd.Flags().GetBool("ipfs-mirrors")
 		if err != nil {
 			fmt.Printf("error getting ipfs-mirrors flag: %v\n", err)
@@ -62,31 +62,40 @@ var linkCmd = &cobra.Command{
 			fmt.Printf("error selecting search mirror: %v\n", err)
 			os.Exit(1)
 		}
+
 		bookDetails, err := libgen.GetDetails(&libgen.GetDetailsOptions{
 			Hashes:       args,
 			SearchMirror: searchMirror,
 			Print:        false,
 		})
 		if err != nil {
-			// If error and no mirror was pinned, try another mirror before exiting
 			if pinnedMirror != nil {
 				log.Fatalf("error retrieving results from LibGen API: %v", err)
 			}
-			secondaryMirror := libgen.GetWorkingMirror(libgen.SearchMirrors)
-			for secondaryMirror == searchMirror {
-				secondaryMirror = libgen.GetWorkingMirror(libgen.SearchMirrors)
+			for _, m := range libgen.SearchMirrors {
+				if m.Host == searchMirror.Host {
+					continue
+				}
+				bookDetails, err = libgen.GetDetails(&libgen.GetDetailsOptions{
+					Hashes:       args,
+					SearchMirror: m,
+					Print:        false,
+				})
+				if err == nil && len(bookDetails) > 0 {
+					break
+				}
 			}
-			bookDetails, err = libgen.GetDetails(&libgen.GetDetailsOptions{
-				Hashes:       args,
-				SearchMirror: secondaryMirror,
-				Print:        false,
-			})
 			if err != nil {
 				log.Fatalf("error retrieving results from LibGen API: %v", err)
 			}
 		}
-		book := bookDetails[0]
 
+		if len(bookDetails) == 0 {
+			fmt.Printf("No book found for hash %s\n", args[0])
+			os.Exit(1)
+		}
+
+		book := bookDetails[0]
 		if err := libgen.GetDownloadURL(book, useIpfs, pinnedMirror); err != nil {
 			fmt.Printf("error getting download URL: %v\n", err)
 			os.Exit(1)
