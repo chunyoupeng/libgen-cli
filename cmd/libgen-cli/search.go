@@ -108,6 +108,14 @@ var searchCmd = &cobra.Command{
 		searchQuery := strings.Join(args, " ")
 		fmt.Printf("++ Searching for: %s\n", searchQuery)
 
+		var cleanExtension []string
+		for _, ext := range extension {
+			ext = strings.TrimSpace(strings.TrimPrefix(ext, "."))
+			if ext != "" {
+				cleanExtension = append(cleanExtension, ext)
+			}
+		}
+
 		var books []*libgen.Book
 		searchMirror, pinnedMirror, err := resolveSearchMirror(mirror)
 		if err != nil {
@@ -120,7 +128,7 @@ var searchCmd = &cobra.Command{
 			Results:       results,
 			Print:         true,
 			RequireAuthor: requireAuthor,
-			Extension:     extension,
+			Extension:     cleanExtension,
 			Year:          year,
 			Publisher:     publisher,
 			Language:      language,
@@ -140,15 +148,17 @@ var searchCmd = &cobra.Command{
 		var bookSelection []string
 		for _, b := range books {
 			selectChoice := fmt.Sprintf("%8s ", color.New(color.FgHiBlue).Sprintf(b.ID))
-			if len(b.Title) > 36 {
-				pBookFormat = b.Title[:36] + "... by"
+			titleRunes := []rune(b.Title)
+			if len(titleRunes) > 36 {
+				pBookFormat = string(titleRunes[:33]) + "... by"
 			} else {
 				pBookFormat = b.Title + " by"
 			}
 			selectChoice += fmt.Sprintf("%s ", pBookFormat)
 			if b.Author != "" {
-				if len(b.Author) > 20 {
-					selectChoice += fmt.Sprintf("%s ", color.New(color.FgYellow).Sprintf(b.Author[:17]+"..."))
+				authorRunes := []rune(b.Author)
+				if len(authorRunes) > 20 {
+					selectChoice += fmt.Sprintf("%s ", color.New(color.FgYellow).Sprintf(string(authorRunes[:17])+"..."))
 				} else {
 					selectChoice += fmt.Sprintf("%s ", color.New(color.FgYellow).Sprintf(b.Author))
 				}
@@ -157,11 +167,13 @@ var searchCmd = &cobra.Command{
 			}
 			selectChoice += fmt.Sprintf("| %-4s ", color.New(color.FgRed).Sprintf(b.Extension))
 			size, err := strconv.Atoi(b.Filesize)
+			var sizeStr string
 			if err != nil {
-				fmt.Printf("error converting string to int: %v\n", err)
-				os.Exit(1)
+				sizeStr = "N/A"
+			} else {
+				sizeStr = humanize.Bytes(uint64(size))
 			}
-			selectChoice += fmt.Sprintf("| %v", color.New(color.FgGreen).Sprintf(humanize.Bytes(uint64(size))))
+			selectChoice += fmt.Sprintf("| %v", color.New(color.FgGreen).Sprintf(sizeStr))
 			bookSelection = append(bookSelection, selectChoice)
 		}
 

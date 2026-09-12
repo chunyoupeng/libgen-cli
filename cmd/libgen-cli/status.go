@@ -17,8 +17,10 @@ package libgen_cli
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
+	"sync"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -50,98 +52,51 @@ var statusCmd = &cobra.Command{
 
 		switch mirror {
 		case "download":
-			for _, url := range libgen.DownloadMirrors {
-				status := libgen.CheckMirror(url)
-				if status == http.StatusOK {
-					if runtime.GOOS == "windows" {
-						_, err := fmt.Fprintf(color.Output, "%s %s\n", color.GreenString("[OK]"), url.Host)
-						if err != nil {
-							fmt.Printf("error writing to Windows os.Stdout: %v\n", err)
-						}
-					} else {
-						fmt.Printf("%s %s\n", color.GreenString("[OK]"), url.Host)
-					}
-				} else {
-					if runtime.GOOS == "windows" {
-						_, err := fmt.Fprintf(color.Output, "%s %s\n", color.RedString("[FAIL]"), url.Host)
-						if err != nil {
-							fmt.Printf("error writing to Windows os.Stdout: %v\n", err)
-						}
-					} else {
-						fmt.Printf("%s %s\n", color.RedString("[FAIL]"), url.Host)
-					}
-				}
-			}
+			checkAndPrintMirrors(libgen.DownloadMirrors)
 		case "search":
-			for _, url := range libgen.SearchMirrors {
-				status := libgen.CheckMirror(url)
-				if status == http.StatusOK {
-					if runtime.GOOS == "windows" {
-						_, err := fmt.Fprintf(color.Output, "%s %s\n", color.GreenString("[OK]"), url.Host)
-						if err != nil {
-							fmt.Printf("error writing to Windows os.Stdout: %v\n", err)
-						}
-					} else {
-						fmt.Printf("%s %s\n", color.GreenString("[OK]"), url.Host)
-					}
-				} else {
-					if runtime.GOOS == "windows" {
-						_, err := fmt.Fprintf(color.Output, "%s %s\n", color.RedString("[FAIL]"), url.Host)
-						if err != nil {
-							fmt.Printf("error writing to Windows os.Stdout: %v\n", err)
-						}
-					} else {
-						fmt.Printf("%s %s\n", color.RedString("[FAIL]"), url.Host)
-					}
-				}
-			}
+			checkAndPrintMirrors(libgen.SearchMirrors)
 		default:
-			for _, url := range libgen.SearchMirrors {
-				status := libgen.CheckMirror(url)
-				if status == http.StatusOK {
-					if runtime.GOOS == "windows" {
-						_, err := fmt.Fprintf(color.Output, "%s %s\n", color.GreenString("[OK]"), url.Host)
-						if err != nil {
-							fmt.Printf("error writing to Windows os.Stdout: %v\n", err)
-						}
-					} else {
-						fmt.Printf("%s %s\n", color.GreenString("[OK]"), url.Host)
-					}
-				} else {
-					if runtime.GOOS == "windows" {
-						_, err := fmt.Fprintf(color.Output, "%s %s\n", color.RedString("[FAIL]"), url.Host)
-						if err != nil {
-							fmt.Printf("error writing to Windows os.Stdout: %v\n", err)
-						}
-					} else {
-						fmt.Printf("%s %s\n", color.RedString("[FAIL]"), url.Host)
-					}
-				}
-			}
-			for _, url := range libgen.DownloadMirrors {
-				status := libgen.CheckMirror(url)
-				if status == http.StatusOK {
-					if runtime.GOOS == "windows" {
-						_, err := fmt.Fprintf(color.Output, "%s %s\n", color.GreenString("[OK]"), url.Host)
-						if err != nil {
-							fmt.Printf("error writing to Windows os.Stdout: %v\n", err)
-						}
-					} else {
-						fmt.Printf("%s %s\n", color.GreenString("[OK]"), url.Host)
-					}
-				} else {
-					if runtime.GOOS == "windows" {
-						_, err := fmt.Fprintf(color.Output, "%s %s\n", color.RedString("[FAIL]"), url.Host)
-						if err != nil {
-							fmt.Printf("error writing to Windows os.Stdout: %v\n", err)
-						}
-					} else {
-						fmt.Printf("%s %s\n", color.RedString("[FAIL]"), url.Host)
-					}
-				}
-			}
+			checkAndPrintMirrors(libgen.SearchMirrors)
+			checkAndPrintMirrors(libgen.DownloadMirrors)
 		}
 	},
+}
+
+func checkAndPrintMirrors(mirrors []url.URL) {
+	type checkRes struct {
+		host string
+		ok   bool
+	}
+
+	results := make([]checkRes, len(mirrors))
+	var wg sync.WaitGroup
+	for i, target := range mirrors {
+		wg.Add(1)
+		go func(idx int, u url.URL) {
+			defer wg.Done()
+			status := libgen.CheckMirror(u)
+			results[idx] = checkRes{
+				host: u.Host,
+				ok:   status == http.StatusOK,
+			}
+		}(i, target)
+	}
+	wg.Wait()
+
+	for _, res := range results {
+		tag := color.GreenString("[OK]")
+		if !res.ok {
+			tag = color.RedString("[FAIL]")
+		}
+		if runtime.GOOS == "windows" {
+			_, err := fmt.Fprintf(color.Output, "%s %s\n", tag, res.host)
+			if err != nil {
+				fmt.Printf("error writing to Windows os.Stdout: %v\n", err)
+			}
+		} else {
+			fmt.Printf("%s %s\n", tag, res.host)
+		}
+	}
 }
 
 func init() {

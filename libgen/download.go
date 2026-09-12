@@ -20,10 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -35,14 +35,21 @@ import (
 // Then, the download process is initiated with a progress bar displayed to
 // the user's CLI.
 func DownloadBook(book *Book, outputPath string) error {
-	var filesize int64
 	filename := getBookFilename(book)
+	destPath, err := resolveDestinationPath(outputPath, filename)
+	if err != nil {
+		return err
+	}
 
 	req, err := http.NewRequest("GET", book.DownloadURL, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Add("Accept-Encoding", "*")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+	if book.PageURL != "" {
+		req.Header.Set("Referer", book.PageURL)
+	}
 	client := http.Client{
 		Transport: &http.Transport{
 			Proxy:           http.ProxyFromEnvironment,
@@ -52,31 +59,40 @@ func DownloadBook(book *Book, outputPath string) error {
 	if err != nil {
 		return err
 	}
+	defer r.Body.Close()
 
-	if r.StatusCode == http.StatusOK {
-		filesize = r.ContentLength
-		bar := pb.Full.Start64(filesize)
-
-		out, err := makeFile(outputPath, filename)
-		if err != nil {
-			return err
-		}
-		_, err = io.Copy(out, bar.NewProxyReader(r.Body))
-		if err != nil {
-			return err
-		}
-
-		bar.Finish()
-
-		if err := out.Close(); err != nil {
-			return err
-		}
-		if err := r.Body.Close(); err != nil {
-			return err
-		}
-	} else {
+	if r.StatusCode != http.StatusOK {
 		return fmt.Errorf("unable to reach mirror %v: HTTP %v", req.Host, r.StatusCode)
 	}
+
+	tmpPath := destPath + ".tmp"
+	out, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+
+	success := false
+	defer func() {
+		_ = out.Close()
+		if !success {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	bar := pb.Full.Start64(r.ContentLength)
+	if _, err = io.Copy(out, bar.NewProxyReader(r.Body)); err != nil {
+		return err
+	}
+	bar.Finish()
+
+	if err := out.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		return err
+	}
+	success = true
 
 	return nil
 }
@@ -89,49 +105,47 @@ func DownloadBook(book *Book, outputPath string) error {
 // working search mirror is chosen. The library.lol/libgen.pm fallback is always
 // automatic.
 func GetDownloadURL(book *Book, useIpfs bool, searchMirror *url.URL) error {
-	// Try getting download URL from search mirror's ads.php page first
-	if err := getSearchMirrorURL(book, searchMirror); err == nil && book.DownloadURL != "" {
-		return nil
+	// If IPFS is requested, DO NOT query search mirror's ads.php (which only yields HTTP links)
+	if !useIpfs {
+		if err := getSearchMirrorURL(book, searchMirror); err == nil && book.DownloadURL != "" {
+			return nil
+		}
 	}
 
-	// Fallback to legacy download mirrors
-	chosenMirror := DownloadMirrors[rand.Intn(len(DownloadMirrors))]
-
-	var x int
-	tries := 3
-	for tries >= x {
-		switch chosenMirror.Hostname() {
+	// Deterministic fallback through configured download mirrors
+	for _, mirror := range DownloadMirrors {
+		switch mirror.Hostname() {
 		case "library.lol":
 			if useIpfs {
-				if err := getLibraryLolURL(book, true); err != nil {
-					return err
+				if err := getLibraryLolURL(book, true); err == nil && book.DownloadURL != "" {
+					return nil
 				}
 			} else {
-				if err := getLibraryLolURL(book, false); err != nil {
-					if err := getLibgenPMURL(book); err != nil {
-						return err
-					}
+				if err := getLibraryLolURL(book, false); err == nil && book.DownloadURL != "" {
+					return nil
+				}
+				if err := getLibgenPMURL(book); err == nil && book.DownloadURL != "" {
+					return nil
 				}
 			}
 		case "libgen.pm":
 			if !useIpfs {
-				if err := getLibgenPMURL(book); err != nil {
-					if err := getLibraryLolURL(book, false); err != nil {
-						return err
-					}
+				if err := getLibgenPMURL(book); err == nil && book.DownloadURL != "" {
+					return nil
+				}
+				if err := getLibraryLolURL(book, false); err == nil && book.DownloadURL != "" {
+					return nil
 				}
 			} else {
 				// No IPFS URLs on libgen.pm pages, fallback to library.lol
-				if err := getLibraryLolURL(book, true); err != nil {
-					return err
+				if err := getLibraryLolURL(book, true); err == nil && book.DownloadURL != "" {
+					return nil
 				}
 			}
 		}
 		if book.DownloadURL != "" {
-			break
+			return nil
 		}
-		// Increment tries
-		x++
 	}
 
 	if book.DownloadURL == "" {
@@ -182,40 +196,59 @@ func DownloadDbdump(filename string, outputPath string) error {
 	if err != nil {
 		return err
 	}
+	destPath, err := resolveDestinationPath(outputPath, filename)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s/%s", mirror.String(), filename), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
 	client := http.Client{
 		Transport: &http.Transport{
 			Proxy:           http.ProxyFromEnvironment,
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}}
-	r, err := client.Get(fmt.Sprintf("%s/%s", mirror.String(), filename))
+	r, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer r.Body.Close()
+
+	if r.StatusCode != http.StatusOK {
+		return fmt.Errorf("unable to reach mirror: HTTP %v", r.StatusCode)
+	}
+
+	tmpPath := destPath + ".tmp"
+	out, err := os.Create(tmpPath)
 	if err != nil {
 		return err
 	}
 
-	if r.StatusCode == http.StatusOK {
-		filesize := r.ContentLength
-		bar := pb.Full.Start64(filesize)
+	success := false
+	defer func() {
+		_ = out.Close()
+		if !success {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
-		out, err := makeFile(outputPath, filename)
-		if err != nil {
-			return err
-		}
-		_, err = io.Copy(out, bar.NewProxyReader(r.Body))
-		if err != nil {
-			return err
-		}
-
-		bar.Finish()
-
-		if err := out.Close(); err != nil {
-			return err
-		}
-		if err := r.Body.Close(); err != nil {
-			return err
-		}
-	} else {
-		return fmt.Errorf("unable to reach mirror: HTTP %v", r.StatusCode)
+	bar := pb.Full.Start64(r.ContentLength)
+	if _, err = io.Copy(out, bar.NewProxyReader(r.Body)); err != nil {
+		return err
 	}
+	bar.Finish()
+
+	if err := out.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		return err
+	}
+	success = true
 
 	return nil
 }
@@ -270,45 +303,44 @@ func getLibgenPMURL(book *Book) error {
 	return nil
 }
 
-func makeFile(outputPath, filename string) (*os.File, error) {
-	var out *os.File
-	var mkErr error
-
-	// Handle long titles
-	if len(filename) >= 256 {
-		filename = filename[:256]
+func resolveDestinationPath(outputPath, filename string) (string, error) {
+	// Handle long titles safely without breaking UTF-8 or extension
+	if len([]rune(filename)) > 200 {
+		ext := filepath.Ext(filename)
+		base := strings.TrimSuffix(filename, ext)
+		r := []rune(base)
+		if len(r) > 180 {
+			base = string(r[:180])
+		}
+		filename = base + ext
 	}
 
-	// if output path was not provided
+	var targetDir string
 	if outputPath == "" {
 		wd, err := os.Getwd()
 		if err != nil {
-			return nil, err
+			return "", err
 		}
-		if stat, err := os.Stat(fmt.Sprintf("%s/libgen", wd)); err == nil && stat.IsDir() {
-			out, mkErr = os.Create(fmt.Sprintf("%s/libgen/%s", wd, filename))
-		} else {
-			if err := os.Mkdir(fmt.Sprintf("%s/libgen", wd), 0755); err != nil {
-				return nil, err
-			}
-			out, mkErr = os.Create(fmt.Sprintf("%s/libgen/%s", wd, filename))
-		}
-		if mkErr != nil {
-			return nil, mkErr
+		targetDir = filepath.Join(wd, "libgen")
+		if err := os.MkdirAll(targetDir, 0755); err != nil {
+			return "", err
 		}
 	} else {
-		// If output path was provided
-		if stat, err := os.Stat(outputPath); err == nil && stat.IsDir() {
-			out, err = os.Create(fmt.Sprintf("%s/%s", outputPath, filename))
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			return nil, errors.New("invalid output path")
+		stat, err := os.Stat(outputPath)
+		if err != nil || !stat.IsDir() {
+			return "", errors.New("invalid output path")
 		}
+		targetDir = outputPath
 	}
+	return filepath.Join(targetDir, filename), nil
+}
 
-	return out, nil
+func makeFile(outputPath, filename string) (*os.File, error) {
+	destPath, err := resolveDestinationPath(outputPath, filename)
+	if err != nil {
+		return nil, err
+	}
+	return os.Create(destPath)
 }
 
 // findMatch is a helper function that searches an []byte
@@ -324,10 +356,24 @@ func findMatch(reg string, response []byte) []byte {
 	return nil
 }
 
+func sanitizeFilename(name string) string {
+	invalidChars := regexp.MustCompile(`[/\\:*?"<>|\x00-\x1f]`)
+	sanitized := invalidChars.ReplaceAllString(name, "_")
+	return strings.TrimSpace(sanitized)
+}
+
 func getBookFilename(book *Book) string {
-	var tmp []string
-	tmp = append(tmp, book.Title)
-	tmp = append(tmp, fmt.Sprintf(" by %s", book.Author))
-	tmp = append(tmp, fmt.Sprintf(".%s", book.Extension))
-	return strings.Join(tmp, "")
+	title := sanitizeFilename(book.Title)
+	if title == "" {
+		title = book.Md5
+	}
+	author := sanitizeFilename(book.Author)
+	ext := strings.TrimPrefix(sanitizeFilename(book.Extension), ".")
+	if ext == "" {
+		ext = "unknown"
+	}
+	if author != "" {
+		return fmt.Sprintf("%s by %s.%s", title, author, ext)
+	}
+	return fmt.Sprintf("%s.%s", title, ext)
 }

@@ -18,7 +18,6 @@ import (
 	"os"
 	"runtime"
 	"strings"
-	"sync"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -91,6 +90,14 @@ var downloadAllCmd = &cobra.Command{
 		searchQuery := strings.Join(args, " ")
 		fmt.Printf("++ Downloading all for: %s\n", searchQuery)
 
+		var cleanExtension []string
+		for _, ext := range extension {
+			ext = strings.TrimSpace(strings.TrimPrefix(ext, "."))
+			if ext != "" {
+				cleanExtension = append(cleanExtension, ext)
+			}
+		}
+
 		searchMirror, pinnedMirror, err := resolveSearchMirror(mirror)
 		if err != nil {
 			fmt.Printf("error selecting search mirror: %v\n", err)
@@ -102,7 +109,7 @@ var downloadAllCmd = &cobra.Command{
 			SearchMirror:  searchMirror,
 			Results:       results,
 			RequireAuthor: requireAuthor,
-			Extension:     extension,
+			Extension:     cleanExtension,
 			Year:          year,
 			Publisher:     publisher,
 			Language:      language,
@@ -114,32 +121,24 @@ var downloadAllCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		var wg sync.WaitGroup
-		bChan := make(chan *libgen.Book, results)
-		for _, book := range books {
+		for i, book := range books {
+			fmt.Printf("(%d/%d) Resolving download link for: %s\n", i+1, len(books), book.Title)
 			if err := libgen.GetDownloadURL(book, useIpfs, pinnedMirror); err != nil {
-				fmt.Printf("error getting download DownloadURL: %v\n", err)
+				fmt.Printf("error getting download URL for %s: %v\n", book.Title, err)
 				continue
 			}
-			wg.Add(1)
-			bChan <- book
-			go func() {
-				curBook := <-bChan
-				if useIpfs {
-					if err := libgen.DownloadBookIPFS(curBook, output); err != nil {
-						fmt.Printf("error downloading %v: %v\n", curBook.Title, err)
-					}
-				} else {
-					if err := libgen.DownloadBook(curBook, output); err != nil {
-						fmt.Printf("error downloading %v: %v\n", curBook, err)
-					}
-				}
 
-				wg.Done()
-			}()
+			fmt.Printf("Downloading: %s by %s\n", book.Title, book.Author)
+			if useIpfs {
+				if err := libgen.DownloadBookIPFS(book, output); err != nil {
+					fmt.Printf("error downloading %v: %v\n", book.Title, err)
+				}
+			} else {
+				if err := libgen.DownloadBook(book, output); err != nil {
+					fmt.Printf("error downloading %v: %v\n", book.Title, err)
+				}
+			}
 		}
-		wg.Wait()
-		close(bChan)
 
 		if runtime.GOOS == "windows" {
 			_, err = fmt.Fprintf(color.Output, "%s\n", color.GreenString("[DONE]"))

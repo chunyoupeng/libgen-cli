@@ -25,10 +25,8 @@ import (
 )
 
 func main() {
-	client := http.Client{Timeout: libgen.HTTPClientTimeout, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
-	_, err := client.Get("http://clients3.google.com/generate_204")
-	if err != nil {
-		fmt.Println("\nYou need an internet connection to run libgen-cli.")
+	if !checkConnectivity() {
+		fmt.Println("\nYou need an internet connection (or properly configured HTTP_PROXY) to run libgen-cli.")
 		os.Exit(1)
 	}
 
@@ -36,4 +34,24 @@ func main() {
 		fmt.Printf("%v", err)
 		os.Exit(1)
 	}
+}
+
+func checkConnectivity() bool {
+	client := http.Client{
+		Timeout: libgen.HTTPClientTimeout,
+		Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+	}
+	probes := []string{
+		"http://clients3.google.com/generate_204",
+		"http://1.1.1.1",
+		"https://libgen.li",
+	}
+	for _, target := range probes {
+		resp, err := client.Get(target)
+		if err == nil {
+			_ = resp.Body.Close()
+			return true
+		}
+	}
+	return false
 }

@@ -18,7 +18,7 @@ import "time"
 
 const (
 	Version             = "v1.1.0"
-	SearchHref          = `href="/ads\.php\?md5=[A-Za-z0-9]{32}"`
+	SearchHref          = `href=['"][^'"]*ads\.php\?md5=[A-Za-z0-9]{32}['"]`
 	SearchMD5           = "[A-Za-z0-9]{32}"
 	libgenPMReg         = `get\.php\?md5=\w{32}&key=\w{16}`
 	libraryLolReg       = `https://download\.library\.lol/main/\d+/[A-Za-z0-9]+/[^"]+`
@@ -28,7 +28,7 @@ const (
 	JSONQuery           = "id,title,author,filesize,extension,md5,year,language,pages,publisher,edition,coverurl"
 	TitleMaxLength      = 68
 	AuthorMaxLength     = 25
-	HTTPClientTimeout   = time.Second * 5
+	HTTPClientTimeout   = time.Second * 10
 	ipfsReg             = `/ipfs/([a-z0-9]+)`
 	//UploadUsername    = "genesis"
 	//UploadPassword    = "upload"

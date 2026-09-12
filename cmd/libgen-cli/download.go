@@ -83,9 +83,9 @@ var downloadCmd = &cobra.Command{
 			if pinnedMirror != nil {
 				log.Fatalf("error retrieving results from LibGen API: %v", err)
 			}
-			secondaryMirror := libgen.GetWorkingMirror(libgen.SearchMirrors)
-			for secondaryMirror == searchMirror {
-				secondaryMirror = libgen.GetWorkingMirror(libgen.SearchMirrors)
+			secondaryMirror, altErr := findAlternativeSearchMirror(searchMirror)
+			if altErr != nil {
+				log.Fatalf("error retrieving results from LibGen API (and no alternative mirror available): %v", err)
 			}
 			bookDetails, err = libgen.GetDetails(&libgen.GetDetailsOptions{
 				Hashes:       args,

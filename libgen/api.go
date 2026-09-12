@@ -28,6 +28,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/fatih/color"
@@ -165,39 +167,59 @@ func Search(options *SearchOptions) ([]*Book, error) {
 // based off of its unique hash/id. That information is then requested
 // in JSON format and sanitized in an array of Books.
 func GetDetails(options *GetDetailsOptions) ([]*Book, error) {
-	var books []*Book
+	n := len(options.Hashes)
+	if n == 0 {
+		return nil, nil
+	}
 
-	// For each hash found on the page, parse it into a Book struct
-	for _, hash := range options.Hashes {
-		// Step 1: Get file info (filesize, extension, pages, md5, edition ID)
-		options.SearchMirror.Path = "json.php"
-		q := options.SearchMirror.Query()
-		q.Set("object", "f")
-		q.Set("md5", hash)
-		options.SearchMirror.RawQuery = q.Encode()
+	concurrency := 8
+	if concurrency > n {
+		concurrency = n
+	}
 
-		b, err := getBody(options.SearchMirror.String())
-		if err != nil {
-			return nil, err
-		}
+	type result struct {
+		index int
+		book  *Book
+		err   error
+	}
 
-		book, editionID, err := parseFileResponse(b)
-		if err != nil {
-			continue
-		}
+	jobs := make(chan int, n)
+	results := make(chan result, n)
+	var wg sync.WaitGroup
 
-		// Step 2: Get edition info (title, author, year, publisher, language)
-		if editionID != "" {
-			options.SearchMirror.Path = "json.php"
-			q = options.SearchMirror.Query()
-			q.Set("object", "e")
-			q.Set("ids", editionID)
-			options.SearchMirror.RawQuery = q.Encode()
-
-			eb, err := getBody(options.SearchMirror.String())
-			if err == nil {
-				parseEditionResponse(eb, book)
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				b, err := fetchSingleDetail(options.SearchMirror, options.Hashes[idx])
+				results <- result{index: idx, book: b, err: err}
 			}
+		}()
+	}
+
+	for i := 0; i < n; i++ {
+		jobs <- i
+	}
+	close(jobs)
+
+	wg.Wait()
+	close(results)
+
+	ordered := make([]*Book, n)
+	var lastErr error
+	for res := range results {
+		if res.err != nil {
+			lastErr = res.err
+		} else if res.book != nil {
+			ordered[res.index] = res.book
+		}
+	}
+
+	var books []*Book
+	for _, book := range ordered {
+		if book == nil {
+			continue
 		}
 
 		// Flag filters
@@ -205,15 +227,26 @@ func GetDetails(options *GetDetailsOptions) ([]*Book, error) {
 			continue
 		}
 		if len(options.Extension) > 0 {
-			validExtension := false
-			// 也就是说可以选择多个后缀，只要满足一个就可以
+			hasTargetExt := false
 			for _, ext := range options.Extension {
-				if ext == book.Extension {
-					validExtension = true
+				ext = strings.TrimSpace(strings.TrimPrefix(ext, "."))
+				if ext != "" {
+					hasTargetExt = true
+					break
 				}
 			}
-			if !validExtension {
-				continue
+			if hasTargetExt {
+				validExtension := false
+				for _, ext := range options.Extension {
+					ext = strings.TrimSpace(strings.TrimPrefix(ext, "."))
+					if ext != "" && strings.EqualFold(ext, book.Extension) {
+						validExtension = true
+						break
+					}
+				}
+				if !validExtension {
+					continue
+				}
 			}
 		}
 		if options.Year != 0 {
@@ -253,7 +286,48 @@ func GetDetails(options *GetDetailsOptions) ([]*Book, error) {
 		books = append(books, book)
 	}
 
+	if len(books) == 0 && lastErr != nil {
+		return nil, lastErr
+	}
+
 	return books, nil
+}
+
+func fetchSingleDetail(mirror url.URL, hash string) (*Book, error) {
+	// Step 1: Get file info (filesize, extension, pages, md5, edition ID)
+	fMirror := mirror
+	fMirror.Path = "json.php"
+	q := fMirror.Query()
+	q.Set("object", "f")
+	q.Set("md5", hash)
+	fMirror.RawQuery = q.Encode()
+
+	b, err := getBody(fMirror.String())
+	if err != nil {
+		return nil, err
+	}
+
+	book, editionID, err := parseFileResponse(b)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 2: Get edition info (title, author, year, publisher, language)
+	if editionID != "" {
+		eMirror := mirror
+		eMirror.Path = "json.php"
+		eq := eMirror.Query()
+		eq.Set("object", "e")
+		eq.Set("ids", editionID)
+		eMirror.RawQuery = eq.Encode()
+
+		eb, err := getBody(eMirror.String())
+		if err == nil {
+			parseEditionResponse(eb, book)
+		}
+	}
+
+	return book, nil
 }
 
 // CheckMirror returns the HTTP status code of the DownloadURL provided.
@@ -267,15 +341,21 @@ func CheckMirror(url url.URL) int {
 
 func probeMirror(url url.URL) (int, error) {
 	client := http.Client{
-		Timeout: HTTPClientTimeout,
+		Timeout: 4 * time.Second,
 		Transport: &http.Transport{
 			Proxy:           http.ProxyFromEnvironment,
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}}
-	r, err := client.Get(url.String())
+	req, err := http.NewRequest("GET", url.String(), nil)
 	if err != nil {
 		return http.StatusBadGateway, err
 	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+	r, err := client.Do(req)
+	if err != nil {
+		return http.StatusBadGateway, err
+	}
+	defer r.Body.Close()
 	if r.StatusCode != http.StatusOK {
 		return r.StatusCode, nil
 	}
@@ -339,21 +419,28 @@ func getBody(baseURL string) ([]byte, error) {
 			Proxy:           http.ProxyFromEnvironment,
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}}
-	r, err := client.Get(baseURL)
+	req, err := http.NewRequest("GET", baseURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+	if u, err := url.Parse(baseURL); err == nil {
+		req.Header.Set("Referer", fmt.Sprintf("%s://%s/index.php", u.Scheme, u.Host))
+	}
+
+	r, err := client.Do(req)
 	if err != nil {
 		log.Printf("http.Get(%q) error: %v", baseURL, err)
 		return nil, err
 	}
+	defer r.Body.Close()
+
 	if r.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unable to reach to mirror %v: %v", baseURL, r.StatusCode)
 	}
 
 	b, err := io.ReadAll(r.Body)
 	if err != nil {
-		return nil, err
-	}
-
-	if err := r.Body.Close(); err != nil {
 		return nil, err
 	}
 
@@ -364,20 +451,21 @@ func getBody(baseURL string) ([]byte, error) {
 // an MD5 hash and then returns the found hashes.
 func parseHashes(response []byte, results int) []string {
 	var hashes []string
+	seen := make(map[string]struct{})
 	re := regexp.MustCompile(SearchHref)
 	matches := re.FindAllString(string(response), -1)
-	// os.WriteFile("response.html", response, 0644)
-	// fmt.Println("matches = ", matches)
-	var counter int
+	md5Re := regexp.MustCompile(SearchMD5)
+
 	for _, m := range matches {
-		if counter >= results {
+		if len(hashes) >= results {
 			break
 		}
-		re := regexp.MustCompile(SearchMD5)
-		hash := re.FindString(m)
+		hash := md5Re.FindString(m)
 		if len(hash) == 32 {
-			hashes = append(hashes, hash)
-			counter++
+			if _, exists := seen[hash]; !exists {
+				seen[hash] = struct{}{}
+				hashes = append(hashes, hash)
+			}
 		}
 	}
 
@@ -483,8 +571,9 @@ func printDetails(book *Book) error {
 
 	// Slice author name if it exceeds AuthorMaxLength
 	var formatAuthor string
-	if len(book.Author) > AuthorMaxLength {
-		formatAuthor = book.Author[:AuthorMaxLength]
+	authorRunes := []rune(book.Author)
+	if len(authorRunes) > AuthorMaxLength {
+		formatAuthor = string(authorRunes[:AuthorMaxLength])
 	} else if book.Author == "" {
 		formatAuthor = "N/A"
 	} else {

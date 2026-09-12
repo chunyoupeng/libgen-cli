@@ -42,6 +42,16 @@ func resolveSearchMirror(mirrorHost string) (url.URL, *url.URL, error) {
 	return m, nil, err
 }
 
+func findAlternativeSearchMirror(exclude url.URL) (url.URL, error) {
+	var candidates []url.URL
+	for _, m := range libgen.SearchMirrors {
+		if m.Host != exclude.Host {
+			candidates = append(candidates, m)
+		}
+	}
+	return libgen.FindWorkingMirror(candidates)
+}
+
 var rootValidArgs = []string{"dbdumps", "download", "download-all", "link", "search", "status", "version"}
 
 // rootCmd represents the base command when called without any subcommands
