@@ -18,7 +18,7 @@ import "time"
 
 const (
 	Version             = "v1.1.0"
-	SearchHref          = `href="/ads\.php\?md5=[A-Za-z0-9]{32}"`
+	SearchHref          = `href=['"][^'"]*ads\.php\?md5=[A-Za-z0-9]{32}['"]`
 	SearchMD5           = "[A-Za-z0-9]{32}"
 	libgenPMReg         = `get\.php\?md5=\w{32}&key=\w{16}`
 	libraryLolReg       = `https://download\.library\.lol/main/\d+/[A-Za-z0-9]+/[^"]+`

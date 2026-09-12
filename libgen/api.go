@@ -445,19 +445,21 @@ func ParseDbdumps(response []byte) []string {
 // parseHashes extracts MD5 hashes from the search result HTML page.
 func parseHashes(response []byte, results int) []string {
 	var hashes []string
+	seen := make(map[string]struct{})
 	re := regexp.MustCompile(SearchHref)
 	matches := re.FindAllString(string(response), -1)
 
-	var counter int
 	md5Re := regexp.MustCompile(SearchMD5)
 	for _, m := range matches {
-		if counter >= results {
+		if len(hashes) >= results {
 			break
 		}
 		hash := md5Re.FindString(m)
 		if len(hash) == 32 {
-			hashes = append(hashes, hash)
-			counter++
+			if _, exists := seen[hash]; !exists {
+				seen[hash] = struct{}{}
+				hashes = append(hashes, hash)
+			}
 		}
 	}
 	return hashes
@@ -572,8 +574,9 @@ func printDetails(book *Book) error {
 	}
 
 	var formatAuthor string
-	if len(book.Author) > AuthorMaxLength {
-		formatAuthor = book.Author[:AuthorMaxLength]
+	authorRunes := []rune(book.Author)
+	if len(authorRunes) > AuthorMaxLength {
+		formatAuthor = string(authorRunes[:AuthorMaxLength])
 	} else if book.Author == "" {
 		formatAuthor = "N/A"
 	} else {

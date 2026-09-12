@@ -1,137 +1,136 @@
 ---
 name: libgen
-description: Search Library Genesis and download books, ebooks, papers, or PDFs via the libgen-cli tool. Use whenever the user wants to find, look up, search for, or download a book / ebook / textbook / paper / PDF.
+description: Search Library Genesis and download books, textbooks, research papers, or PDFs via libgen-cli. Trigger whenever the user asks to find, search for, look up, or download any book, ebook, manual, or academic document.
 ---
 
-# libgen — search & download from Library Genesis
+# libgen — Search & Download from Library Genesis
 
-Drive the `libgen-cli` command-line tool to search Library Genesis and download
-books on the user's behalf. The flow is always the same: **bootstrap → search →
-parse MD5 → download by MD5**.
+Drive the `libgen-cli` tool to query Library Genesis and retrieve documents on the user's behalf.
+The operational flow is strictly decoupled: **Bootstrap → Search & Parse → Select & Download**.
 
-## 1. Bootstrap (do this first, before any search)
-
-Make sure the binary is available. Run:
-
-```bash
-command -v libgen-cli || command -v libgen
+```
+[Agent Action Pipeline]
+   ┌─────────────┐       Title Only       ┌───────────────┐
+   │ User Query  │ ─────────────────────► │ libgen search │
+   └─────────────┘                        └───────┬───────┘
+                                                  │ Clean stdout (MD5 + Meta)
+                                                  ▼
+   ┌─────────────┐       MD5 Hash         ┌───────────────┐
+   │ File on Disk│ ◄───────────────────── │libgen download│
+   └─────────────┘                        └───────────────┘
 ```
 
-If a path prints, use that command name for everything below (prefer `libgen-cli`).
+---
 
-If nothing prints, install it with `go install`:
+## 1. Bootstrap Check (Execute First)
+
+Confirm the CLI executable exists in the local environment:
+
+```bash
+command -v libgen-cli || command -v libgen || echo "NOT_INSTALLED"
+```
+
+If neither is available, install via Go:
 
 ```bash
 go install github.com/chunyoupeng/libgen-cli@latest
-export PATH="$(go env GOPATH)/bin:$PATH"   # GOPATH defaults to ~/go
-command -v libgen-cli
+export PATH="$(go env GOPATH)/bin:$PATH"
 ```
 
-Fallback if `go install` fails (no Go toolchain, or module resolution error):
+Fallback build from source:
 
 ```bash
 git clone https://github.com/chunyoupeng/libgen-cli /tmp/libgen-cli
-cd /tmp/libgen-cli && make build      # produces ./libgen
+cd /tmp/libgen-cli && make build
+# Binary is located at /tmp/libgen-cli/libgen
 ```
 
-then invoke it as `/tmp/libgen-cli/libgen`.
+> **Network Note**: The tool probes Google, Cloudflare, and primary mirrors upon start. If running behind an institutional firewall or proxy, ensure `HTTP_PROXY` / `HTTPS_PROXY` is exported.
 
-**The binary needs internet.** On startup it pings Google and exits immediately if
-offline — so if it dies with no output, check connectivity first.
+---
 
-## 2. Search + filter
+## 2. Search & Metadata Extraction
 
-Non-interactive search prints results to stdout (it does NOT download):
+`libgen search` runs in **non-blocking print mode** by default. It never opens a TUI selector unless `-t / --interactive` is passed. **Never pass `-t` in autonomous workflows.**
 
 ```bash
-libgen-cli search "<query>" -r <count> [filters]
+libgen-cli search "<title_query>" -r <limit> [flags]
 ```
 
-Filter flags (same set for `download-all`):
+### Search Flags Reference
 
-| flag | meaning | example |
-|------|---------|---------|
-| `-r, --results` | max results (default 10) | `-r 5` |
-| `-e, --extension` | file type; repeat for multiple | `-e pdf -e epub` |
-| `-a, --require-author` | drop results with no author | `-a` |
-| `-y, --year` | exact year | `-y 2020` |
-| `-p, --publisher` | publisher substring | `-p "O'Reilly"` |
-| `-l, --language` | language | `-l English` |
-| `-s, --sort-by` | id, title, author, pub, year, lang, size, ext | `-s year` |
-| `--sort-asc` | ascending (default true); `--sort-asc=false` for desc | `--sort-asc=false` |
-| `-o, --output` | download directory | `-o ~/Books` |
-| `-m, --mirror` | pin a specific search mirror by host (skip auto-select) | `-m libgen.li` |
+| Flag | Description | Recommended Usage |
+|------|-------------|-------------------|
+| `-r, --results` | Result limit (1-100, default 10) | `-r 5` (keeps context compact) |
+| `-e, --extension` | File format filter | `-e pdf` or `-e pdf,epub` (leading dots ignored) |
+| `-a, --require-author` | Discard entries without listed author | `-a` (reduces noise) |
+| `-y, --year` | Filter by publication year | `-y 2023` |
+| `-p, --publisher` | Case-insensitive publisher substring | `-p "O'Reilly"` |
+| `-l, --language` | Case-insensitive language filter | `-l English` |
+| `-s, --sort-by` | Sort key: `id`, `title`, `author`, `year`, `size`, `ext` | `-s year` |
+| `--sort-asc` | Sort direction (default `true`) | `--sort-asc=false` (newest first) |
+| `-m, --mirror` | Pin search mirror host (bypasses auto-probe) | `-m libgen.li` |
 
-Example:
+### Critical Search Guidelines
+1. **Query Title Only**: Never combine author names into the query string (e.g., `"Martin Kleppmann Designing Data-Intensive"` often yields 0 matches). Query `"Designing Data-Intensive"` and filter with `-a` or inspect the author in the output.
+2. **Output Stream Structure**:
+   ```text
+   MD5: 5a8a1c93a0ef6a26df0f9cf8290bc5e8 Designing Data-Intensive Applications
+       ++ @author Martin Kleppmann           @year 2017  @size  12 MB  @type  pdf
+   ```
+3. **Parse Regex**:
+   - MD5: `(?i)\b[a-f0-9]{32}\b`
+   - Capture the 32-character hexadecimal hash to drive subsequent download or link retrieval.
 
-```bash
-libgen-cli search "deep learning" -r 5 -e pdf -y 2020 -l English -s year
-```
+---
 
-**Search the title only.** Never put the author's name in the query string — filter
-by author with `-a` (or `-p` for publisher) instead. Mixing the author into the title
-usually returns nothing.
+## 3. Link & Download Execution
 
-**Pinning a mirror** — `-m, --mirror <host>` is available on `search`, `download`,
-`download-all`, and `link`. By default a random working mirror is chosen; pass `-m` to
-force a specific one (it pins the **search** mirror, which is also the primary source for
-download links). Useful when one mirror is flaky. Run `libgen-cli status -m search` first
-to see which hosts are `[OK]`, then e.g. `-m libgen.li`. An unknown host errors out and
-lists the valid hosts. The `library.lol`/`libgen.pm` download fallback stays automatic.
-
-**Output format** — each result is two lines:
-
-```
-MD5: a1b2c3d4e5f6...<32 hex>  Some Book Title
-    ++ @author Jane Doe  @year 2020  @size 12 MB  @type pdf
-```
-
-Parse the **MD5 with the regex `[a-f0-9]{32}`** (one per result line). Color is
-auto-disabled when output is piped, so it's clean ASCII — no ANSI stripping needed.
-
-Present results to the user as a numbered list (title / author / year / size / type).
-Keep each row's MD5 internally so you can download the one they pick.
-
-- `-t, --interactive` exists but is an arrow-key TUI menu for humans — **never use it
-  from the agent**, it needs a real TTY.
-
-## 3. Download
-
-Once the user picks (or there's a single obvious match), download by MD5:
-
-```bash
-libgen-cli download <md5> -o <dir>
-```
-
-Just want the direct URL without downloading? Use:
+### Option A: Retrieve Direct URL (Zero File I/O)
+When the user only needs the download link, or to delegate the download to an external downloader (`curl`, `wget`, `aria2`):
 
 ```bash
 libgen-cli link <md5>
 ```
 
-Download every match for a query (use only when the user explicitly asks for "all"):
+### Option B: Download to Local Disk
+Download by target MD5 hash:
 
 ```bash
-libgen-cli download-all "<query>" <filters> -o <dir>
+libgen-cli download <md5> -o <destination_dir>
 ```
 
-Confirm the destination directory with the user before a bulk `download-all`.
+- **Atomic File Writes**: Downloads stream into a temporary `<file>.tmp` and perform an atomic `os.Rename` only after full transfer. Incomplete files are deleted automatically on interruption.
+- **Path Sanitization**: Book titles with path delimiters (`/`, `\`, `:`) are converted to `_` automatically, ensuring safe flat storage without unintentional directory creation.
 
-## 4. Other commands
+### Option C: Bulk Download
+Download all matches from a search query (only when explicitly requested by user):
 
-- `libgen-cli status [-m search|download]` — check which mirrors are alive (`[OK]`/`[FAIL]`).
-- `libgen-cli dbdumps` — interactive DB-dump downloader (TUI; humans only, don't drive it).
-- `libgen-cli version` — print version.
+```bash
+libgen-cli download-all "<query>" [flags] -o <destination_dir>
+```
 
-## 5. Troubleshooting
+Downloads execute sequentially with isolated progress reporting to maintain clean terminal logs.
 
-- **Mirrors are flaky — retry before giving up.** Up to ~3 attempts per book is reasonable
-  before reporting failure to the user.
-- **"Please provide a valid MD5 hash"** — you passed a non-MD5 (e.g. a numeric ID or
-  title). Re-grab the 32-hex MD5 from the search output.
-- **Search/download fails or times out** — Library Genesis mirrors are community-run and
-  frequently go down. Retry, or run `libgen-cli status` to find a live mirror. Transient
-  failure here is expected, not a bug.
-- **Binary exits instantly with no output** — almost always offline; check the connection.
-- **IPFS** — pass `-i` on `search`/`download`/`download-all`/`link` to use IPFS gateways
-  instead of HTTP mirrors when normal mirrors are down.
+---
+
+## 4. Self-Healing & Troubleshooting
+
+Autonomous agents should apply this standard retry loop when encountering transient failures:
+
+```
+Search / Download Fails
+         │
+         ▼
+Run `libgen-cli status -m search` (~1s concurrent check)
+         │
+         ├─► Find first host marked [OK] (e.g. libgen.li)
+         │   Retry with: `libgen-cli search ... -m libgen.li`
+         │
+         └─► If HTTP mirrors fail, fallback to IPFS:
+             Retry with: `libgen-cli download ... -i`
+```
+
+1. **"Please provide a valid MD5 hash"**: Verify the argument passed to `download` or `link` matches `^[a-fA-F0-9]{32}$`. Do not pass numeric IDs or titles.
+2. **Connection Timeout**: Library Genesis community mirrors frequently rotate or suffer outages. Execute `libgen-cli status` to detect live nodes before retrying.
+3. **IPFS Fallback**: Passing `-i / --ipfs-mirrors` routes downloads through decentralized IPFS gateways, bypassing blocked HTTP mirrors.
