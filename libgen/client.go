@@ -16,6 +16,7 @@ package libgen
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,7 +25,7 @@ import (
 )
 
 const (
-	DefaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+	DefaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 	MaxBodyReadLimit = 10 * 1024 * 1024 // 10MB
 )
 
@@ -34,6 +35,7 @@ var defaultTransport = &http.Transport{
 	MaxIdleConnsPerHost: 8,
 	MaxConnsPerHost:     8,
 	IdleConnTimeout:     90 * time.Second,
+	TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 }
 
 var defaultHTTPClient = &http.Client{

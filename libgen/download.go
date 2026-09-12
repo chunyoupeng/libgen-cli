@@ -26,7 +26,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cheggaaa/pb/v3"
 )
@@ -53,72 +55,112 @@ func DownloadBook(book *Book, outputPath string) error {
 	}
 
 	finalPath := filepath.Join(targetDir, filename)
+	if stat, err := os.Stat(finalPath); err == nil && stat.Size() > 0 {
+		return nil
+	}
+
 	tempPath := finalPath + ".tmp"
+	var totalSize int64
+	maxRetries := 5
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, book.DownloadURL, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", DefaultUserAgent)
-	req.Header.Set("Accept", "*/*")
-	if book.PageURL != "" {
-		req.Header.Set("Referer", book.PageURL)
-	} else if u, err := url.Parse(book.DownloadURL); err == nil && u.Scheme != "" && u.Host != "" {
-		req.Header.Set("Referer", fmt.Sprintf("%s://%s/index.php", u.Scheme, u.Host))
-	}
-
-	resp, err := downloadHTTPClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unable to reach mirror %v: HTTP %v", req.Host, resp.StatusCode)
-	}
-
-	ct := resp.Header.Get("Content-Type")
-	if strings.HasPrefix(ct, "text/html") && resp.ContentLength < 10000 {
-		return fmt.Errorf("mirror returned HTML error page instead of media")
-	}
-
-	f, err := os.Create(tempPath)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = f.Close()
-		if _, statErr := os.Stat(tempPath); statErr == nil {
-			_ = os.Remove(tempPath)
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		var downloaded int64
+		if stat, err := os.Stat(tempPath); err == nil {
+			downloaded = stat.Size()
 		}
-	}()
 
-	var reader io.Reader = resp.Body
-	var bar *pb.ProgressBar
-	if resp.ContentLength > 0 {
-		bar = pb.Full.Start64(resp.ContentLength)
-		reader = bar.NewProxyReader(resp.Body)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, book.DownloadURL, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("User-Agent", DefaultUserAgent)
+		req.Header.Set("Accept", "*/*")
+		if book.PageURL != "" {
+			req.Header.Set("Referer", book.PageURL)
+		} else if u, err := url.Parse(book.DownloadURL); err == nil && u.Scheme != "" && u.Host != "" {
+			req.Header.Set("Referer", fmt.Sprintf("%s://%s/index.php", u.Scheme, u.Host))
+		}
+
+		if downloaded > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", downloaded))
+		}
+
+		resp, err := downloadHTTPClient.Do(req)
+		if err == nil && (resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests) {
+			resp.Body.Close()
+			time.Sleep(2 * time.Second)
+			_ = GetDownloadURL(book, false, nil)
+			continue
+		}
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			resp.Body.Close()
+			time.Sleep(2 * time.Second)
+			_ = GetDownloadURL(book, false, nil)
+			continue
+		}
+
+		ct := resp.Header.Get("Content-Type")
+		if strings.HasPrefix(ct, "text/html") && resp.ContentLength < 10000 {
+			resp.Body.Close()
+			return fmt.Errorf("mirror returned HTML error page instead of media")
+		}
+
+		var f *os.File
+		if resp.StatusCode == http.StatusPartialContent {
+			if totalSize == 0 {
+				if cr := resp.Header.Get("Content-Range"); cr != "" {
+					parts := strings.Split(cr, "/")
+					if len(parts) == 2 {
+						totalSize, _ = strconv.ParseInt(parts[1], 10, 64)
+					}
+				}
+				if totalSize == 0 {
+					totalSize = downloaded + resp.ContentLength
+				}
+			}
+			f, err = os.OpenFile(tempPath, os.O_WRONLY|os.O_APPEND, 0644)
+		} else {
+			totalSize = resp.ContentLength
+			downloaded = 0
+			f, err = os.Create(tempPath)
+		}
+		if err != nil {
+			resp.Body.Close()
+			return err
+		}
+
+		var reader io.Reader = resp.Body
+		var bar *pb.ProgressBar
+		if totalSize > 0 {
+			bar = pb.Full.Start64(totalSize)
+			bar.SetCurrent(downloaded)
+			reader = bar.NewProxyReader(resp.Body)
+		}
+
+		copied, copyErr := io.Copy(f, reader)
+		downloaded += copied
+		if bar != nil {
+			bar.Finish()
+		}
+		_ = f.Sync()
+		_ = f.Close()
+		_ = resp.Body.Close()
+
+		if copyErr == nil && (totalSize == 0 || downloaded >= totalSize) {
+			return os.Rename(tempPath, finalPath)
+		}
+
+		// Interrupted by network timeout or EOF, retry and resume with Range
+		time.Sleep(2 * time.Second)
 	}
 
-	written, err := io.Copy(f, reader)
-	if bar != nil {
-		bar.Finish()
-	}
-	if err != nil {
-		return err
-	}
-	if resp.ContentLength > 0 && written < resp.ContentLength {
-		return fmt.Errorf("truncated download: expected %d bytes, got %d", resp.ContentLength, written)
-	}
-
-	if err := f.Sync(); err != nil {
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-
-	return os.Rename(tempPath, finalPath)
+	_ = os.Remove(tempPath)
+	return fmt.Errorf("download failed after %d retries", maxRetries)
 }
 
 // GetDownloadURL resolves book.DownloadURL using a multi-tiered fallback.
